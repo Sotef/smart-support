@@ -3,6 +3,7 @@ import httpx
 import json
 import re
 import logging
+import os
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 
@@ -16,8 +17,9 @@ class SciboxService:
     Реализует извлечение именованных сущностей и классификацию текстов
     """
     
-    def __init__(self, scibox_url: str = "http://localhost:8001"):
+    def __init__(self, scibox_url: str = "http://localhost:8001", api_key: Optional[str] = None):
         self.scibox_url = scibox_url
+        self.api_key = api_key or os.getenv("SCIBOX_API_KEY")
         self.client = None
         self.initialized = False
         
@@ -120,9 +122,15 @@ class SciboxService:
                 ]
             }
             
+            headers = {}
+            if self.api_key:
+                # Передаем API-ключ как Bearer токен (при необходимости скорректировать согласно документации Scibox)
+                headers["Authorization"] = f"Bearer {self.api_key}"
+
             response = await self.client.post(
                 f"{self.scibox_url}/api/analyze",
-                json=payload
+                json=payload,
+                headers=headers or None,
             )
             
             if response.status_code == 200:

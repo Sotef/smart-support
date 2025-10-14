@@ -5,7 +5,10 @@ from fastapi.responses import HTMLResponse
 import asyncio
 import json
 import logging
+import os
 from typing import List, Dict, Any
+
+from dotenv import load_dotenv
 
 from .models import SupportRequest, SupportResponse, AnalysisResult
 from .services.scibox_service import SciboxService
@@ -17,6 +20,9 @@ from .websocket_manager import WebSocketManager
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Загружаем переменные окружения из .env при старте процесса (если файл присутствует)
+load_dotenv()
 
 app = FastAPI(
     title="Smart Support: ИИ-ассистент службы поддержки",
@@ -37,7 +43,8 @@ app.add_middleware(
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 # Инициализация сервисов
-scibox_service = SciboxService()
+_scibox_url = os.getenv("SCIBOX_URL", "http://localhost:8001")
+scibox_service = SciboxService(scibox_url=_scibox_url)
 knowledge_base = KnowledgeBaseService()
 recommendation_engine = RecommendationEngine(knowledge_base, scibox_service)
 websocket_manager = WebSocketManager()

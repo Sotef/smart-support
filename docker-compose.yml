@@ -55,7 +55,6 @@ services:
     restart: unless-stopped
     volumes:
       - postgres-data:/var/lib/postgresql/data
-      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
 
   # Scibox Mock Service (эмуляция Scibox API)
   scibox-mock:
@@ -75,7 +74,7 @@ services:
         python mock_scibox.py
       "
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      test: ["CMD", "python", "-c", "import urllib.request,sys; urllib.request.urlopen('http://localhost:8001/health').read()"]
       interval: 30s
       timeout: 10s
       retries: 3

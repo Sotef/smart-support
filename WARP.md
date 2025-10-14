@@ -125,6 +125,19 @@ High-level architecture and data flow
   - static/app.js bootstraps a WebSocket to /ws/{client_id}; if WS is closed/unavailable, falls back to HTTP POST /api/analyze.
   - Renders analysis results, recommended actions, insights, and suggested responses; provides a feedback modal to POST /api/feedback.
 
+New frontend (branch front_main)
+
+- Исходники фронтенда из rezniki/Support-dashboard добавлены в каталог frontend/Support-dashboard (Vite + React).
+- Сборка и публикация в static/:
+
+  ```pwsh path=null start=null
+  # Требуется установленный Node.js (https://nodejs.org)
+  pwsh ./scripts/build_front.ps1
+  ```
+
+- Скрипт выполнит npm ci && npm run build в frontend/Support-dashboard и скопирует содержимое dist/ в static/.
+- Бэкенд продолжает раздавать статику из каталога static/ без изменений кода.
+
 - Containerization and services
   - Dockerfile builds a Python 3.11-slim image, installs requirements, copies app and static, runs uvicorn.
   - docker-compose.yml optionally orchestrates:

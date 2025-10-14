@@ -1,0 +1,163 @@
+body {
+  margin: 0;
+  font-family: "Inter", sans-serif;
+  background: #f9fafb;
+  color: #1f2937;
+}
+
+.dashboard {
+  display: flex;
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* --- Sidebar --- */
+.sidebar {
+  width: 20%;
+  background: #1e3a8a;
+  color: white;
+  padding: 20px;
+  overflow-y: auto;
+}
+
+.sidebar__title {
+  font-size: 18px;
+  margin-bottom: 20px;
+}
+
+.ticket {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  padding: 10px;
+  margin-bottom: 10px;
+  cursor: pointer;
+  transition: background 0.3s;
+}
+
+.ticket:hover,
+.ticket.active {
+  background: rgba(255, 255, 255, 0.25);
+}
+
+/* --- Chat --- */
+.chat {
+  flex: 1;
+  background: #fff;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+}
+
+.chat__header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-bottom: 1px solid #e5e7eb;
+  padding-bottom: 10px;
+}
+
+.close-btn {
+  background: #1e3a8a;
+  color: white;
+  border: none;
+  padding: 6px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.chat__body {
+  flex: 1;
+  padding: 20px 0;
+  overflow-y: auto;
+}
+
+.message {
+  padding: 10px 14px;
+  border-radius: 10px;
+  max-width: 70%;
+  margin-bottom: 10px;
+}
+
+.message--client {
+  background: #f3f4f6;
+  align-self: flex-start;
+}
+
+.message--operator {
+  background: #1e3a8a;
+  color: white;
+  align-self: flex-end;
+}
+
+.chat__input {
+  display: flex;
+  gap: 8px;
+  border-top: 1px solid #e5e7eb;
+  padding-top: 10px;
+}
+
+.chat__input input {
+  flex: 1;
+  padding: 8px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+}
+
+.send-btn {
+  background: #1e3a8a;
+  color: white;
+  border: none;
+  padding: 8px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+/* --- Leaderboard --- */
+.leaderboard {
+  width: 25%;
+  background: #f3f4f6;
+  padding: 20px;
+  overflow-y: auto;
+}
+
+.leaderboard__item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+  background: #fff;
+  padding: 10px;
+  border-radius: 8px;
+}
+
+.rank {
+  font-weight: bold;
+  color: #1e3a8a;
+}
+
+/* --- Адаптив --- */
+@media (max-width: 1024px) {
+  .sidebar {
+    width: 25%;
+  }
+
+  .leaderboard {
+    width: 30%;
+  }
+}
+
+@media (max-width: 768px) {
+  .dashboard {
+    flex-direction: column;
+  }
+
+  .sidebar,
+  .leaderboard {
+    width: 100%;
+    order: 2;
+  }
+
+  .chat {
+    order: 1;
+  }
+}

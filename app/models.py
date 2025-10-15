@@ -62,7 +62,10 @@ class KnowledgeBaseArticle(BaseModel):
     id: str = Field(..., description="ID статьи")
     title: str = Field(..., description="Заголовок")
     content: str = Field(..., description="Содержание")
-    category: RequestCategory = Field(..., description="Категория")
+    category: RequestCategory = Field(..., description="Категория (нормализованная)")
+    # Дополнительные поля из Excel
+    main_category: Optional[str] = Field(None, description="Основная категория (как в Excel)")
+    subcategory: Optional[str] = Field(None, description="Подкатегория (как в Excel)")
     tags: List[str] = Field(default_factory=list, description="Теги")
     relevance_score: Optional[float] = Field(None, ge=0.0, le=1.0, description="Релевантность")
     last_updated: datetime = Field(default_factory=datetime.now, description="Последнее обновление")
@@ -82,21 +85,27 @@ class SupportResponse(BaseModel):
     classification: RequestCategory = Field(..., description="Классификация запроса")
     entities: List[Entity] = Field(default_factory=list, description="Извлеченные сущности")
     confidence: float = Field(..., ge=0.0, le=1.0, description="Общая уверенность анализа")
-    
+
+    # Доп. характеристики (для требований хакатона)
+    sentiment_score: Optional[float] = Field(None, description="Тональность от -1 до 1")
+    tone_label: Optional[str] = Field(None, description="Метка тональности: negative|neutral|positive")
+    kb_category: Optional[str] = Field(None, description="Категория из БЗ (нормализованная)")
+    kb_subcategory: Optional[str] = Field(None, description="Подкатегория/раздел из БЗ (как в файле)")
+
     recommendations: Dict[str, Any] = Field(
-        default_factory=dict, 
+        default_factory=dict,
         description="Рекомендации из базы знаний"
     )
     suggested_responses: List[str] = Field(
-        default_factory=list, 
+        default_factory=list,
         description="Предлагаемые ответы"
     )
-    
+
     relevant_articles: List[KnowledgeBaseArticle] = Field(
-        default_factory=list, 
+        default_factory=list,
         description="Релевантные статьи базы знаний"
     )
-    
+
     processing_time: Optional[float] = Field(None, description="Время обработки в секундах")
     timestamp: datetime = Field(default_factory=datetime.now, description="Время ответа")
 

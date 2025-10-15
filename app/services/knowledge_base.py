@@ -1,9 +1,12 @@
 import asyncio
 import json
 import logging
+import os
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 import uuid
+
+import pandas as pd
 
 from ..models import KnowledgeBaseArticle, RequestCategory, AnalysisResult
 
@@ -18,8 +21,21 @@ class KnowledgeBaseService:
     def __init__(self):
         self.articles: List[KnowledgeBaseArticle] = []
         self.initialized = False
-        
-        # Синтетические данные для демонстрации
+
+        # Путь к Excel-базе знаний (если задан — используем её вместо синтетической)
+        self.kb_excel_path = os.getenv("KNOWLEDGE_BASE_XLSX")
+        self.kb_sheet = os.getenv("KB_SHEET")  # имя листа или индекс
+        # Переопределение колонок (если структура отличается)
+        self.kb_col_title = os.getenv("KB_COL_TITLE")
+        self.kb_col_content = os.getenv("KB_COL_CONTENT")
+        # Явные имена колонок для основной/подкатегории
+        self.kb_col_main_category = os.getenv("KB_COL_MAIN_CATEGORY") or os.getenv("KB_COL_CATEGORY")
+        self.kb_col_subcategory = os.getenv("KB_COL_SUBCATEGORY")
+        self.kb_col_tags = os.getenv("KB_COL_TAGS")
+        # JSON-мэппинг категорий Excel -> RequestCategory
+        self.kb_category_map_raw = os.getenv("KB_CATEGORY_MAP")
+
+        # Синтетические данные для демонстрации (используются, если Excel не задан)
         self.synthetic_articles = [
             {
                 "id": "tech_001",
@@ -99,8 +115,20 @@ class KnowledgeBaseService:
     async def initialize(self):
         """Инициализация базы знаний"""
         try:
-            # Загружаем синтетические данные
             self.articles = []
+
+            if self.kb_excel_path and os.path.exists(self.kb_excel_path):
+                loaded = self._load_from_excel(self.kb_excel_path)
+                if loaded:
+                    self.initialized = True
+                    logger.info(
+                        f"База знаний загружена из Excel: {self.kb_excel_path}, статей: {len(self.articles)}"
+                    )
+                    return
+                else:
+                    logger.warning("Не удалось загрузить Excel, используем синтетическую базу знаний")
+
+            # Fallback: синтетические данные
             for article_data in self.synthetic_articles:
                 article = KnowledgeBaseArticle(
                     id=article_data["id"],
@@ -110,10 +138,10 @@ class KnowledgeBaseService:
                     tags=article_data["tags"]
                 )
                 self.articles.append(article)
-            
+
             self.initialized = True
-            logger.info(f"База знаний инициализирована: {len(self.articles)} статей")
-            
+            logger.info(f"База знаний инициализирована (synthetic): {len(self.articles)} статей")
+
         except Exception as e:
             logger.error(f"Ошибка инициализации базы знаний: {str(e)}")
             self.initialized = True  # Продолжаем работать
@@ -141,6 +169,8 @@ class KnowledgeBaseService:
                         "title": article.title,
                         "content": article.content,
                         "category": article.category.value,
+                        "main_category": article.main_category,
+                        "subcategory": article.subcategory,
                         "tags": article.tags,
                         "relevance_score": relevance_score,
                         "solutions": article_data.get("solutions", [])
@@ -149,11 +179,146 @@ class KnowledgeBaseService:
             
             # Сортируем по релевантности
             results.sort(key=lambda x: x["relevance_score"], reverse=True)
+            if not results:
+                # Фолбэк: если ничего не найдено, вернуть первые N статей (для демонстрации)
+                fallback = []
+                for article in self.articles[:limit]:
+                    fallback.append({
+                        "id": article.id,
+                        "title": article.title,
+                        "content": article.content,
+                        "category": article.category.value,
+                        "tags": article.tags,
+                        "relevance_score": 0.1,
+                    })
+                return fallback
             return results[:limit]
             
         except Exception as e:
             logger.error(f"Ошибка поиска в базе знаний: {str(e)}")
             return []
+
+    def _load_from_excel(self, path: str) -> bool:
+        try:
+            # Выбор листа
+            sheet = 0
+            if self.kb_sheet:
+                try:
+                    sheet = int(self.kb_sheet)
+                except ValueError:
+                    sheet = self.kb_sheet
+
+            df = pd.read_excel(path, sheet_name=sheet, engine="openpyxl")
+            if df is None or df.empty:
+                return False
+
+            # Нормализуем имена колонок для автоопределения
+            norm = {c: str(c).strip().lower() for c in df.columns}
+            inv = {v: k for k, v in norm.items()}
+
+            def pick(name: Optional[str], candidates: List[str]) -> Optional[str]:
+                # Явно заданное имя столбца
+                if name and name in df.columns:
+                    return name
+                # Точное совпадение по нормализованному имени
+                for cand in candidates:
+                    if cand in inv:
+                        return inv[cand]
+                # Частичное совпадение (подстрока)
+                for c_idx, c in enumerate(df.columns):
+                    nc = norm[c]
+                    for cand in candidates:
+                        if cand in nc or nc in cand:
+                            return c
+                return None
+
+            # Расширенные синонимы для автоопределения колонок
+            title_candidates = [
+                "title","заголовок","вопрос","пример вопроса","query","question"
+            ]
+            content_candidates = [
+                "content","ответ","шаблонный ответ","answer","text","body"
+            ]
+            category_candidates = [
+                "категория","category","основная категория","main category"
+            ]
+            subcategory_candidates = [
+                "подкатегория","subcategory","раздел"
+            ]
+            tags_candidates = [
+                "tags","теги","keywords"
+            ]
+
+            col_title = pick(self.kb_col_title, title_candidates) or list(df.columns)[0]
+            col_content = pick(self.kb_col_content, content_candidates) or list(df.columns)[1]
+            col_main_category = pick(self.kb_col_main_category, category_candidates) or None
+            col_subcategory = pick(self.kb_col_subcategory, subcategory_candidates) or None
+            col_tags = pick(self.kb_col_tags, tags_candidates) or None
+
+            cat_map: Dict[str, str] = {}
+            if self.kb_category_map_raw:
+                try:
+                    cat_map = json.loads(self.kb_category_map_raw)
+                except Exception:
+                    cat_map = {}
+
+            def map_category(val: Optional[str]) -> (RequestCategory, str):
+                if not val:
+                    return RequestCategory.GENERAL, ""
+                raw = str(val).strip()
+                mapped = cat_map.get(raw, raw).lower()
+                try:
+                    return RequestCategory(mapped), raw
+                except Exception:
+                    # эвристика
+                    if "тех" in mapped or "tech" in mapped:
+                        return RequestCategory.TECHNICAL, raw
+                    if "оплат" in mapped or "bill" in mapped or "счет" in mapped:
+                        return RequestCategory.BILLING, raw
+                    if "аккаун" in mapped or "доступ" in mapped or "парол" in mapped:
+                        return RequestCategory.ACCOUNT, raw
+                    if "жалоб" in mapped or "претенз" in mapped:
+                        return RequestCategory.COMPLAINT, raw
+                    if "функц" in mapped or "feature" in mapped:
+                        return RequestCategory.FEATURE_REQUEST, raw
+                    return RequestCategory.GENERAL, raw
+
+            for idx, row in df.iterrows():
+                title = str(row.get(col_title, "")).strip()
+                content = str(row.get(col_content, "")).strip()
+                main_raw = str(row.get(col_main_category, "")).strip() if col_main_category else ""
+                sub_raw = str(row.get(col_subcategory, "")).strip() if col_subcategory else ""
+                cat_enum, cat_raw = map_category(main_raw or sub_raw)
+                tags_val = row.get(col_tags, "") if col_tags else ""
+                if isinstance(tags_val, str):
+                    tags = [t.strip() for t in tags_val.split(",") if t and str(t).strip()]
+                elif isinstance(tags_val, (list, tuple)):
+                    tags = [str(t).strip() for t in tags_val if str(t).strip()]
+                else:
+                    tags = []
+                # Добавляем исходное описание категории как тег для лучшего поиска
+                if cat_raw:
+                    tags.append(cat_raw)
+                if sub_raw:
+                    tags.append(sub_raw)
+
+                art_id = f"kb_{cat_enum.value}_{idx}"
+                self.articles.append(
+                    KnowledgeBaseArticle(
+                        id=art_id,
+                        title=title or (content[:40] + "...") if content else art_id,
+                        content=content or title,
+                        category=cat_enum,
+                        main_category=main_raw or cat_raw,
+                        subcategory=sub_raw or None,
+                        tags=tags,
+                    )
+                )
+
+            return len(self.articles) > 0
+        except Exception as e:
+            logger.error(f"Ошибка загрузки Excel: {e}")
+            return False
 
     def _calculate_relevance(self, article: KnowledgeBaseArticle, query: str) -> float:
         """

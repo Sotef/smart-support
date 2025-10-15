@@ -8,6 +8,7 @@ const Chat = () => {
   const [analysis, setAnalysis] = useState(null);
   const [suggested, setSuggested] = useState([]);
   const [connecting, setConnecting] = useState(false);
+  const [ragMode, setRagMode] = useState(false); // по умолчанию дословно из БЗ
   const wsRef = useRef(null);
   const clientIdRef = useRef(
     `client_${Math.random().toString(36).slice(2, 9)}`
@@ -77,6 +78,7 @@ const Chat = () => {
       request_id: generateRequestId(),
       text,
       channel: "web",
+      metadata: { reply_mode: ragMode ? "gen" : "kb" }
     };
 
     const ws = wsRef.current;
@@ -139,10 +141,23 @@ const Chat = () => {
         <div>
           <h3>Smart Support</h3>
           {analysis ? (
-            <p>
-              Категория: <b>{analysis.classification}</b>
-              {" "}| Уверенность: <b>{Math.round((analysis.confidence || 0) * 100)}%</b>
-            </p>
+            <div>
+              <p>
+                Категория (БЗ): <b>{analysis.kb_category || analysis.classification}</b>
+                {analysis.kb_subcategory ? (
+                  <>
+                    {" "}| Подкатегория: <b>{analysis.kb_subcategory}</b>
+                  </>
+                ) : null}
+                {" "}| Уверенность: <b>{Math.round((analysis.confidence || 0) * 100)}%</b>
+              </p>
+              {typeof analysis.sentiment_score === "number" ? (
+                <p>
+                  Тон: <b>{analysis.tone_label || "neutral"}</b>
+                  {" "}({analysis.sentiment_score.toFixed(2)})
+                </p>
+              ) : null}
+            </div>
           ) : (
             <p>{connecting ? "Подключение..." : "Готов к анализу"}</p>
           )}
@@ -151,6 +166,12 @@ const Chat = () => {
       </div>
 
       <div className="chat__body">
+        <div style={{marginBottom:8}}>
+          <label style={{display:"flex", alignItems:"center", gap:8}}>
+            <input type="checkbox" checked={ragMode} onChange={(e)=>setRagMode(e.target.checked)} />
+            Генеративный ответ (RAG) по БЗ
+          </label>
+        </div>
         {messages.map((m, idx) => (
           <div
             key={idx}
@@ -174,6 +195,24 @@ const Chat = () => {
                 .map((e) => `${e.type}: ${e.text}`)
                 .join("; ")}
             </p>
+          </div>
+        ) : null}
+
+        {analysis?.recommendations?.relevant_articles?.length ? (
+          <div className="message">
+            <p><b>Статьи БЗ (источники):</b></p>
+            <ul>
+              {analysis.recommendations.relevant_articles.slice(0,3).map((a,i)=>(
+                <li key={i}>
+                  <a href={`/api/knowledge-base/article/${a.id}`} target="_blank" rel="noreferrer">
+                    <b>{a.title}</b>
+                  </a>
+                  <div style={{fontSize:"0.9em", opacity:0.9}}>
+                    {(a.content || "").slice(0,200)}{(a.content||"").length>200?"...":""}
+                  </div>
+                </li>
+              ))}
+            </ul>
           </div>
         ) : null}
 
@@ -207,9 +246,12 @@ const Chat = () => {
                 </li>
               ))}
             </ul>
-            <div style={{ marginTop: 8 }}>
+            <div style={{ marginTop: 8, display: "flex", gap: 8 }}>
               <button className="close-btn" onClick={() => sendFeedback(5, true)}>
-                👍 Отправить фидбек
+                ✅ Решено
+              </button>
+              <button className="close-btn" onClick={() => sendFeedback(1, false)}>
+                ❌ Не решено
               </button>
             </div>
           </div>

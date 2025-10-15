@@ -1,6 +1,9 @@
 # Local frontend temp clones
 /tmp_front/
 
+# Tools (portable Node, etc.)
+/tools/
+
 # Python
 __pycache__/
 *.pyc

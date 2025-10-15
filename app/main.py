@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException, Depends, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, FileResponse
 import asyncio
 import json
 import logging
@@ -41,6 +41,8 @@ app.add_middleware(
 
 # Статические файлы
 app.mount("/static", StaticFiles(directory="static"), name="static")
+# Путь для Vite-артефактов из сборки (assets/*)
+app.mount("/assets", StaticFiles(directory="static/assets"), name="assets")
 
 # Инициализация сервисов
 _scibox_url = os.getenv("SCIBOX_URL", "http://localhost:8001")
@@ -62,6 +64,11 @@ async def read_root():
     """Главная страница"""
     with open("static/index.html", "r", encoding="utf-8") as f:
         return HTMLResponse(content=f.read())
+
+@app.get("/vite.svg")
+async def vite_svg():
+    """Статический ресурс иконки Vite из сборки"""
+    return FileResponse("static/vite.svg")
 
 @app.post("/api/analyze", response_model=SupportResponse)
 async def analyze_support_request(request: SupportRequest):

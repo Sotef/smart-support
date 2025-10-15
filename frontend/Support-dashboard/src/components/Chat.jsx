@@ -1,37 +1,233 @@
+import { useEffect, useRef, useState } from "react";
+
 const Chat = () => {
-    return (
-        <section className="chat">
-        <div className="chat__header">
-            <div>
-            <h3>Rachel Jenkins</h3>
-            <p>How can I get a refund?</p>
-            </div>
-            <button className="close-btn">Close Ticket</button>
-        </div>
+  const [input, setInput] = useState("");
+  const [messages, setMessages] = useState([
+    { role: "system", text: "Введите текст обращения и нажмите отправить" },
+  ]);
+  const [analysis, setAnalysis] = useState(null);
+  const [suggested, setSuggested] = useState([]);
+  const [connecting, setConnecting] = useState(false);
+  const wsRef = useRef(null);
+  const clientIdRef = useRef(
+    `client_${Math.random().toString(36).slice(2, 9)}`
+  );
 
-        <div className="chat__body">
-            <div className="message message--client">
-            <p>
-                Good day, I need to know how the refund process works, I went
-                through that section on your website but the instructions are so
-                confusing. Thank you.
-            </p>
-            </div>
+  useEffect(() => {
+    // Инициализация WebSocket
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const url = `${protocol}//${window.location.host}/ws/${clientIdRef.current}`;
 
-            <div className="message message--operator">
-            <p>
-                You have reached the Supportzen chatbot. My name is Yinka and I’ll
-                be helping you out.
-            </p>
-            </div>
-        </div>
+    try {
+      setConnecting(true);
+      const ws = new WebSocket(url);
+      wsRef.current = ws;
 
-        <div className="chat__input">
-            <input type="text" placeholder="Type a message..." />
-            <button className="send-btn">➤</button>
-        </div>
-        </section>
+      ws.onopen = () => {
+        setConnecting(false);
+        addSystemMsg("WebSocket подключён");
+      };
+      ws.onclose = () => {
+        addSystemMsg("WebSocket отключён, используем HTTP");
+      };
+      ws.onerror = () => {
+        addSystemMsg("Ошибка WebSocket, используем HTTP");
+      };
+      ws.onmessage = (ev) => {
+        try {
+          const msg = JSON.parse(ev.data);
+          if (msg.type === "analysis_complete" || msg.type === "analysis_result") {
+            handleAnalysisResult(msg.data);
+          } else if (msg.type === "system_notification") {
+            addSystemMsg(msg.message || "Системное уведомление");
+          }
+        } catch {}
+      };
+    } catch (e) {
+      addSystemMsg("Не удалось подключиться к WebSocket");
+    }
+
+    return () => {
+      try {
+        wsRef.current?.close();
+      } catch {}
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const addSystemMsg = (text) =>
+    setMessages((prev) => [...prev, { role: "system", text }]);
+
+  const addUserMsg = (text) =>
+    setMessages((prev) => [...prev, { role: "user", text }]);
+
+  const addBotMsg = (text) =>
+    setMessages((prev) => [...prev, { role: "bot", text }]);
+
+  const generateRequestId = () => `req_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+
+  const handleSend = async () => {
+    const text = input.trim();
+    if (!text) return;
+
+    addUserMsg(text);
+    setInput("");
+
+    const payload = {
+      request_id: generateRequestId(),
+      text,
+      channel: "web",
+    };
+
+    const ws = wsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(
+        JSON.stringify({ type: "analyze_request", data: payload })
+      );
+      addSystemMsg("Отправлено через WebSocket, ожидаем анализ...");
+      return;
+    }
+
+    // Fallback: HTTP
+    try {
+      addSystemMsg("Отправлено через HTTP, ожидаем анализ...");
+      const resp = await fetch(`/api/analyze`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!resp.ok) throw new Error("Ошибка анализа");
+      const data = await resp.json();
+      handleAnalysisResult(data);
+    } catch (e) {
+      addSystemMsg(`Ошибка: ${e.message || e}`);
+    }
+  };
+
+  const handleAnalysisResult = (data) => {
+    setAnalysis(data);
+    setSuggested(data?.suggested_responses || []);
+
+    // Отрисуем краткий итог в чат
+    const cat = data?.classification;
+    const conf = data?.confidence;
+    addBotMsg(
+      `Категория: ${cat} (${Math.round((conf || 0) * 100)}%). ` +
+        (data?.recommendations?.insights?.[0] || "Рекомендации готовы.")
     );
+  };
+
+  const sendFeedback = async (quality = 5, responseUsed = true) => {
+    if (!analysis?.request_id) return;
+    try {
+      await fetch(`/api/feedback`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          request_id: analysis.request_id,
+          recommendation_quality: quality,
+          response_used: responseUsed,
+        }),
+      });
+      addSystemMsg("Спасибо за обратную связь!");
+    } catch {}
+  };
+
+  return (
+    <section className="chat">
+      <div className="chat__header">
+        <div>
+          <h3>Smart Support</h3>
+          {analysis ? (
+            <p>
+              Категория: <b>{analysis.classification}</b>
+              {" "}| Уверенность: <b>{Math.round((analysis.confidence || 0) * 100)}%</b>
+            </p>
+          ) : (
+            <p>{connecting ? "Подключение..." : "Готов к анализу"}</p>
+          )}
+        </div>
+        <button className="close-btn" onClick={() => setAnalysis(null)}>Сбросить</button>
+      </div>
+
+      <div className="chat__body">
+        {messages.map((m, idx) => (
+          <div
+            key={idx}
+            className={
+              m.role === "user"
+                ? "message message--client"
+                : m.role === "bot"
+                ? "message message--operator"
+                : "message"
+            }
+          >
+            <p>{m.text}</p>
+          </div>
+        ))}
+
+        {analysis?.entities?.length ? (
+          <div className="message">
+            <p>
+              <b>Сущности:</b>{" "}
+              {analysis.entities
+                .map((e) => `${e.type}: ${e.text}`)
+                .join("; ")}
+            </p>
+          </div>
+        ) : null}
+
+        {analysis?.recommendations?.actions?.length ? (
+          <div className="message">
+            <p>
+              <b>Действия:</b>
+            </p>
+            <ul>
+              {analysis.recommendations.actions.map((a, i) => (
+                <li key={i}>{a}</li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
+
+        {suggested.length ? (
+          <div className="message">
+            <p><b>Предлагаемые ответы:</b></p>
+            <ul>
+              {suggested.map((s, i) => (
+                <li key={i}>
+                  <button
+                    className="send-btn"
+                    onClick={() => navigator.clipboard.writeText(s)}
+                    title="Скопировать"
+                  >
+                    📋
+                  </button>{" "}
+                  {s}
+                </li>
+              ))}
+            </ul>
+            <div style={{ marginTop: 8 }}>
+              <button className="close-btn" onClick={() => sendFeedback(5, true)}>
+                👍 Отправить фидбек
+              </button>
+            </div>
+          </div>
+        ) : null}
+      </div>
+
+      <div className="chat__input">
+        <input
+          type="text"
+          placeholder="Опишите обращение клиента..."
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && handleSend()}
+        />
+        <button className="send-btn" onClick={handleSend}>➤</button>
+      </div>
+    </section>
+  );
 };
 
 export default Chat;

@@ -79,6 +79,23 @@ knowledge_base = KnowledgeBaseService()
 recommendation_engine = RecommendationEngine(knowledge_base, scibox_service)
 websocket_manager = WebSocketManager()
 
+# Глобальный категоризатор для быстрой категоризации
+global_categorizer = None
+
+async def get_or_init_categorizer():
+    """Получение или инициализация глобального категоризатора"""
+    global global_categorizer
+    if global_categorizer is None:
+        try:
+            from app.services.kb_embedding_categorizer import KnowledgeBaseCategorizer
+            global_categorizer = KnowledgeBaseCategorizer(knowledge_base, scibox_service)
+            await global_categorizer.initialize_from_knowledge_base()
+            logger.info("Global categorizer initialized successfully")
+        except Exception as e:
+            logger.error(f"Failed to initialize global categorizer: {e}")
+            global_categorizer = None
+    return global_categorizer
+
 # Переключатель сохранения логов (для тестов можно не сохранять)
 SAVE_LOGS = os.getenv("SAVE_LOGS", "0").lower() in ("1", "true", "yes")
 
@@ -334,8 +351,10 @@ async def session_list():
 @app.get("/api/session/analytics")
 async def session_analytics():
     """
-    Аналитика сессий с категоризацией
+    Аналитика сессий с категоризацией через эмбеддинги БЗ
     """
+    # Используем глобальный категоризатор для быстрой обработки
+    categorizer = await get_or_init_categorizer()
     sessions = session_store.list()
     analytics = []
     
@@ -346,18 +365,34 @@ async def session_analytics():
         
         # Анализируем первое сообщение для категоризации
         category = None
+        subcategory = None
         sentiment = None
         keywords = []
+        confidence = 0.0
         
         if first_msg:
             try:
                 text = first_msg.get("text", "")
+                
+                # Категоризация через эмбеддинги
+                if categorizer:
+                    category, subcategory, confidence = await categorizer.categorize_text(text)
+                else:
+                    category, subcategory, confidence = "общие вопросы", "консультация", 0.3
+                
+                # Анализ через Scibox для sentiment и keywords
                 analysis = await scibox_service.analyze_text(text)
-                category = str(analysis.classification.value) if analysis.classification else None
                 sentiment = analysis.sentiment
                 keywords = analysis.keywords[:5] if analysis.keywords else []
+                
             except Exception as e:
                 logger.warning(f"Analytics analysis error: {e}")
+                category = "general"
+                subcategory = "consultation"
+        
+        # Получаем отображаемые имена
+        category_display = categorizer.get_category_display_name(category) if categorizer and category else category
+        subcategory_display = categorizer.get_subcategory_display_name(category, subcategory) if categorizer and subcategory else subcategory
         
         analytics.append({
             "session_id": s.get("id"),
@@ -366,6 +401,10 @@ async def session_analytics():
             "created_at": s.get("created_at"),
             "client_question": first_msg.get("text") if first_msg else None,
             "category": category,
+            "category_display": category_display,
+            "subcategory": subcategory,
+            "subcategory_display": subcategory_display,
+            "categorization_confidence": confidence,
             "sentiment": sentiment,
             "keywords": keywords,
             "messages_count": len(s.get("messages", [])),
@@ -374,14 +413,23 @@ async def session_analytics():
     
     # Статистика по категориям
     category_stats = {}
+    subcategory_stats = {}
+    
     for item in analytics:
         cat = item.get("category") or "unknown"
+        subcat = item.get("subcategory") or "other"
+        
         category_stats[cat] = category_stats.get(cat, 0) + 1
+        
+        if cat not in subcategory_stats:
+            subcategory_stats[cat] = {}
+        subcategory_stats[cat][subcat] = subcategory_stats[cat].get(subcat, 0) + 1
     
     return {
         "total_sessions": len(sessions),
         "sessions": analytics,
-        "category_stats": category_stats
+        "category_stats": category_stats,
+        "subcategory_stats": subcategory_stats
     }
 
 @app.get("/api/session/{session_id}")
@@ -679,6 +727,29 @@ async def session_start(payload: Dict[str, Any]):
             if top:
                 session_store.add_message(sid, "bot", top[0])
             suggestions = resp.suggested_responses or []
+            
+            # ЛОГИРУЕМ КАТЕГОРИЗАЦИЮ ПРИ СОЗДАНИИ СЕССИИ
+            try:
+                category = resp.kb_category or (str(resp.classification.value) if resp.classification else "unknown")
+                subcategory = resp.kb_subcategory or "-"
+                sentiment = resp.sentiment_score or 0.0
+                tone = resp.tone_label or "neutral"
+                priority = (resp.recommendations or {}).get("priority", "medium")
+                
+                logger.info(
+                    f"\n=== NEW SESSION ===\n"
+                    f"Session ID: {sid}\n"
+                    f"Subject: {subject}\n"
+                    f"Category: {category}\n"
+                    f"Subcategory: {subcategory}\n"
+                    f"Sentiment: {sentiment:.2f} ({tone})\n"
+                    f"Priority: {priority}\n"
+                    f"Question: {description[:100]}...\n"
+                    f"================="
+                )
+            except Exception as log_e:
+                logger.warning(f"Failed to log categorization: {log_e}")
+                
         except Exception as _e:
             logger.warning(f"session_start analyze fallback: {_e}", exc_info=True)
             # Добавляем дефолтное сообщение бота при ошибке анализа
@@ -753,6 +824,31 @@ async def message_send(payload: Dict[str, Any]):
                 operator_requested = True
             # Подсчёт клиентских сообщений
             client_msgs = [m for m in s["messages"] if m.get("sender") == "client"]
+            
+            # Категоризация нового сообщения клиента
+            try:
+                categorizer = await get_or_init_categorizer()
+                if categorizer:
+                    category, subcategory, confidence = await categorizer.categorize_text(text)
+                else:
+                    category, subcategory, confidence = "общие вопросы", "консультация", 0.3
+                
+                # Отправляем категоризацию операторам по WebSocket
+                await websocket_manager.broadcast({
+                    "type": "message_categorized",
+                    "session_id": sid,
+                    "message_id": msg["id"],
+                    "category": category,
+                    "subcategory": subcategory,
+                    "confidence": confidence,
+                    "text": text[:100] + "..." if len(text) > 100 else text
+                })
+                
+                logger.info(f"Real-time categorization: sid={sid}, category='{category}', subcategory='{subcategory}', confidence={confidence:.3f}")
+                
+            except Exception as cat_e:
+                logger.warning(f"Real-time categorization failed: {cat_e}")
+            
             # Анализ и автоответ
             req = SupportRequest(
                 request_id=f"req_{uuid4().hex[:8]}",
@@ -866,6 +962,65 @@ async def session_close(payload: Dict[str, Any]):
     except Exception as e:
         logger.error(f"session_close error: {e}")
         raise HTTPException(status_code=500, detail="session_close failed")
+
+@app.post("/api/session/connect")
+async def session_connect_operator(payload: Dict[str, Any]):
+    """
+    Подключение оператора к сессии клиента
+    """
+    try:
+        sid = str(payload.get("session_id") or "")
+        operator_id = str(payload.get("operator_id") or "")
+        if not sid or not operator_id:
+            raise HTTPException(status_code=400, detail="session_id and operator_id required")
+        
+        s = session_store.get(sid)
+        if not s:
+            raise HTTPException(status_code=404, detail="session not found")
+        
+        # Обновляем статус сессии и привязываем оператора
+        s["operator_id"] = operator_id
+        s["status"] = "started"
+        s["connected_at"] = datetime.utcnow()
+        
+        # Добавляем системное сообщение о подключении оператора
+        system_msg = {
+            "id": f"m_{uuid4().hex[:8]}",
+            "sender": "system",
+            "text": f"Оператор #{operator_id} подключился к чату",
+            "timestamp": datetime.utcnow(),
+            "status": "sent",
+            "read_by": [],
+        }
+        s["messages"].append(system_msg)
+        
+        # Уведомляем всех участников через WebSocket
+        try:
+            await websocket_manager.broadcast({
+                "type": "operator_connected",
+                "session_id": sid,
+                "operator_id": operator_id,
+                "message": system_msg,
+                "session": s
+            })
+        except Exception as ws_e:
+            logger.warning(f"websocket broadcast failed: {ws_e}")
+        
+        logger.info(f"Operator {operator_id} connected to session {sid}")
+        
+        return {
+            "session_id": sid,
+            "operator_id": operator_id,
+            "status": s["status"],
+            "connected_at": s["connected_at"],
+            "messages": s["messages"]
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"session_connect_operator error: {e}")
+        raise HTTPException(status_code=500, detail="operator connection failed")
 
 # Эти эндпоинты перенесены выше SPA fallback
 

@@ -5,7 +5,6 @@ import { ChatArea } from "@/components/chat-area"
 import { ThemeToggle } from "@/components/theme-toggle"
 import { LanguageToggle } from "@/components/language-toggle"
 import { useLanguage } from "@/lib/language-context"
-import { mockTickets } from "@/lib/mock-data"
 import type { Ticket } from "@/lib/types"
 import { cn } from "@/lib/utils"
 import { MessageSquare, History, Plus } from "lucide-react"
@@ -56,7 +55,38 @@ export default function ClientPage() {
     } catch {}
   }
 
-useEffect(() => { refreshSessions() }, [])
+useEffect(() => { 
+  refreshSessions()
+  
+  // WebSocket для real-time обновлений чата
+  try {
+    const proto = typeof window !== 'undefined' && window.location.protocol === 'https:' ? 'wss' : 'ws'
+    const host = typeof window !== 'undefined' ? window.location.hostname : 'localhost'
+    const ws = new WebSocket(`${proto}://${host}:8000/ws/operator_dashboard`)
+    
+    ws.onmessage = (ev) => {
+      try {
+        const msg = JSON.parse(ev.data)
+        if (msg.type === 'message_created' || msg.type === 'message_read') {
+          // Обновляем чат при новых сообщениях
+          refreshSessions()
+        } else if (msg.type === 'operator_connected') {
+          // Оператор подключился к чату
+          console.log('🎯 Operator connected:', msg.operator_id)
+          // Обновляем сессии, чтобы показать новый статус
+          refreshSessions()
+          // Если это текущий выбранный тикет, показываем уведомление
+          if (selectedTicket?.id === msg.session_id) {
+            // Здесь можно добавить toast-уведомление или другой UI индикатор
+            console.log('Оператор подключился к вашему чату!')
+          }
+        }
+      } catch {}
+    }
+    
+    return () => ws.close()
+  } catch {}
+}, [])
 
   // mark reads when viewing chat
   useEffect(() => {

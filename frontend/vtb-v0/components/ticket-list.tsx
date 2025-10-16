@@ -3,7 +3,7 @@
 import { useState } from "react"
 import type { Ticket, TicketStatus } from "@/lib/types"
 import { cn } from "@/lib/utils"
-import { RefreshCw, Search } from "lucide-react"
+import { RefreshCw, Search, UserCheck } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { useLanguage } from "@/lib/language-context"
 
@@ -11,9 +11,10 @@ interface TicketListProps {
   tickets: Ticket[]
   onSelectTicket: (ticket: Ticket) => void
   selectedTicketId?: string
+  onConnectToChat?: (ticketId: string) => void
 }
 
-export function TicketList({ tickets, onSelectTicket, selectedTicketId }: TicketListProps) {
+export function TicketList({ tickets, onSelectTicket, selectedTicketId, onConnectToChat }: TicketListProps) {
   const { t } = useLanguage()
   const [activeTab, setActiveTab] = useState<TicketStatus>("assigned")
 
@@ -24,6 +25,14 @@ export function TicketList({ tickets, onSelectTicket, selectedTicketId }: Ticket
 
   const getTabCount = (status: TicketStatus) => {
     return tickets.filter((t) => t.status === status).length
+  }
+
+  const getUnreadCount = (ticket: Ticket) => {
+    if (!ticket.messages) return 0
+    return ticket.messages.filter(msg => 
+      msg.sender !== 'operator' && 
+      (!msg.readBy || !msg.readBy.includes('operator'))
+    ).length
   }
 
   return (
@@ -111,8 +120,61 @@ export function TicketList({ tickets, onSelectTicket, selectedTicketId }: Ticket
                   )}
                 />
                 <div className="flex-1 min-w-0">
-                  <div className="font-medium text-sm text-card-foreground truncate">{ticket.subject}</div>
+                  <div className="flex items-center justify-between">
+                    <div className="font-medium text-sm text-card-foreground truncate">{ticket.subject}</div>
+                    {ticket.status === "assigned" && onConnectToChat && (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onConnectToChat(ticket.id);
+                        }}
+                        className="ml-2 p-1 rounded-md hover:bg-primary/10 text-primary transition-colors"
+                        title="Подключиться к чату"
+                      >
+                        <UserCheck className="h-4 w-4" />
+                      </button>
+                    )}
+                  </div>
                   <div className="text-xs text-muted-foreground truncate mt-1">{ticket.preview}</div>
+                  <div className="flex items-center justify-between mt-2">
+                    <div className="flex gap-1 flex-wrap">
+                      {ticket.categoryDisplay && (
+                        <Badge variant="secondary" className="text-xs font-medium">
+                          {ticket.categoryDisplay}
+                        </Badge>
+                      )}
+                      {ticket.subcategoryDisplay && (
+                        <Badge variant="outline" className="text-xs border-blue-300 text-blue-700">
+                          {ticket.subcategoryDisplay}
+                        </Badge>
+                      )}
+                      {ticket.sentiment && (
+                        <Badge 
+                          variant="outline" 
+                          className={cn(
+                            "text-xs",
+                            ticket.sentiment === 'positive' && "border-green-500 text-green-700",
+                            ticket.sentiment === 'negative' && "border-red-500 text-red-700",
+                            ticket.sentiment === 'neutral' && "border-gray-500 text-gray-700"
+                          )}
+                        >
+                          {ticket.sentiment}
+                        </Badge>
+                      )}
+                      {ticket.keywords && ticket.keywords.length > 0 && (
+                        <Badge variant="outline" className="text-xs border-purple-300 text-purple-700">
+                          {ticket.keywords[0]}
+                          {ticket.keywords.length > 1 && ` +${ticket.keywords.length - 1}`}
+                        </Badge>
+                      )}
+                    </div>
+                    {/* Индикатор новых сообщений */}
+                    {getUnreadCount(ticket) > 0 && selectedTicketId !== ticket.id && (
+                      <div className="bg-red-500 text-white text-xs font-bold px-2 py-1 rounded-full min-w-[20px] text-center">
+                        {getUnreadCount(ticket)}
+                      </div>
+                    )}
+                  </div>
                 </div>
               </div>
             </button>

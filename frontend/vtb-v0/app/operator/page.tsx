@@ -17,6 +17,7 @@ export default function OperatorPage() {
   const [isLeaderboardCollapsed, setIsLeaderboardCollapsed] = useState(false)
   const [suggested, setSuggested] = useState<string[]>([])
   const [lastRequestId, setLastRequestId] = useState<string | null>(null)
+  const [analyticsData, setAnalyticsData] = useState<any>(null)
 
   const mapSessionToTicket = (s: any): Ticket => {
     const msgs: Message[] = (s.messages || [])
@@ -33,6 +34,10 @@ export default function OperatorPage() {
         status: m.status || 'sent',
         readBy: m.read_by || [],
       }))
+    
+    // Находим данные аналитики для этой сессии
+    const analytics = analyticsData?.sessions?.find((a: any) => a.session_id === s.id)
+    
     return {
       id: s.id,
       clientName: s.client_id || 'Client',
@@ -43,11 +48,32 @@ export default function OperatorPage() {
       createdAt: new Date(s.created_at || Date.now()),
       messages: msgs,
       priority: (s.priority as any) || 'MEDIUM',
+      category: analytics?.category,
+      categoryDisplay: analytics?.category_display,
+      subcategory: analytics?.subcategory,
+      subcategoryDisplay: analytics?.subcategory_display,
+      sentiment: analytics?.sentiment,
+      keywords: analytics?.keywords,
     }
+  }
+
+  const loadAnalytics = async () => {
+    try {
+      const resp = await fetch('/api/session/analytics')
+      if (resp.ok) {
+        const data = await resp.json()
+        setAnalyticsData(data)
+        return data
+      }
+    } catch {}
+    return null
   }
 
   const refreshSessions = async () => {
     try {
+      // Сначала загружаем аналитику, чтобы она была доступна в mapSessionToTicket
+      const analytics = await loadAnalytics()
+      
       const resp = await fetch('/api/session/list')
       if (!resp.ok) return
       const data = await resp.json()
@@ -56,18 +82,29 @@ export default function OperatorPage() {
     } catch {}
   }
 
-// initial load + WebSocket RT обновления
+  // initial load + WebSocket RT обновления
   useEffect(() => {
     refreshSessions()
     // RT: подписка на события сервера
     try {
       const proto = typeof window !== 'undefined' && window.location.protocol === 'https:' ? 'wss' : 'ws'
       const host = typeof window !== 'undefined' ? window.location.hostname : 'localhost'
-      const ws = new WebSocket(`${proto}://${host}:8001/ws/operator_dashboard`)
+      const ws = new WebSocket(`${proto}://${host}:8000/ws/operator_dashboard`)
       ws.onmessage = (ev) => {
         try {
           const msg = JSON.parse(ev.data)
           if (msg.type === 'session_started' || msg.type === 'message_created' || msg.type === 'analysis_complete' || msg.type === 'message_read') {
+            refreshSessions()
+          } else if (msg.type === 'message_categorized') {
+            // Отображаем уведомление о новой категоризации
+            console.log('📊 New message categorized:', {
+              session: msg.session_id,
+              category: msg.category,
+              subcategory: msg.subcategory,
+              confidence: msg.confidence,
+              text: msg.text
+            })
+            // Обновляем список для отображения новых категорий
             refreshSessions()
           }
         } catch {}
@@ -75,6 +112,40 @@ export default function OperatorPage() {
       return () => ws.close()
     } catch {}
   }, [])
+
+  // Горячие клавиши для переключения между чатами
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Ctrl/Cmd + 1-9 для быстрого переключения между чатами
+      if ((e.ctrlKey || e.metaKey) && e.key >= '1' && e.key <= '9') {
+        e.preventDefault()
+        const index = parseInt(e.key) - 1
+        if (tickets[index]) {
+          setSelectedTicket(tickets[index])
+        }
+      }
+      // Ctrl/Cmd + ↑/↓ для навигации по списку чатов
+      else if ((e.ctrlKey || e.metaKey) && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+        e.preventDefault()
+        if (!selectedTicket || tickets.length === 0) return
+        
+        const currentIndex = tickets.findIndex(t => t.id === selectedTicket.id)
+        if (currentIndex === -1) return
+        
+        let newIndex
+        if (e.key === 'ArrowUp') {
+          newIndex = currentIndex > 0 ? currentIndex - 1 : tickets.length - 1
+        } else {
+          newIndex = currentIndex < tickets.length - 1 ? currentIndex + 1 : 0
+        }
+        
+        setSelectedTicket(tickets[newIndex])
+      }
+    }
+
+    document.addEventListener('keydown', handleKeyDown)
+    return () => document.removeEventListener('keydown', handleKeyDown)
+  }, [tickets, selectedTicket])
 
   // mark reads when viewing a ticket
   useEffect(() => {
@@ -169,6 +240,39 @@ export default function OperatorPage() {
     } catch {}
   }
 
+  const handleConnectToChat = async (ticketId: string) => {
+    try {
+      const operatorId = `op_${Date.now()}` // В реальном приложении это ID текущего оператора
+      const resp = await fetch('/api/session/connect', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+          session_id: ticketId, 
+          operator_id: operatorId 
+        }),
+      })
+      
+      if (resp.ok) {
+        const data = await resp.json()
+        console.log('Connected to chat:', data)
+        
+        // Обновляем список тикетов
+        await refreshSessions()
+        
+        // Автоматически выбираем подключенный тикет
+        const connectedTicket = tickets.find(t => t.id === ticketId)
+        if (connectedTicket) {
+          const updatedTicket = { ...connectedTicket, status: 'started' as any }
+          setSelectedTicket(updatedTicket)
+        }
+      } else {
+        console.error('Failed to connect to chat:', await resp.text())
+      }
+    } catch (error) {
+      console.error('Error connecting to chat:', error)
+    }
+  }
+
   const stats = {
     issuesPending: 86,
     issuesEscalated: 2,
@@ -181,7 +285,12 @@ export default function OperatorPage() {
         <OperatorSidebar activeView="tickets" />
         <div className="flex-1 flex flex-col">
           <div className="flex items-center justify-between px-6 py-3 bg-card border-b border-border">
-            <h1 className="text-xl font-semibold text-card-foreground">Support Dashboard</h1>
+            <div className="flex items-center gap-4">
+              <h1 className="text-xl font-semibold text-card-foreground">Support Dashboard</h1>
+              <div className="text-xs text-muted-foreground hidden md:block">
+                Ctrl+1-9: Быстрое переключение • Ctrl+↑↓: Навигация
+              </div>
+            </div>
             <div className="flex items-center gap-2">
               <LanguageToggle />
               <ThemeToggle />
@@ -189,7 +298,12 @@ export default function OperatorPage() {
           </div>
           <StatsBar stats={stats} />
           <div className="flex-1 flex overflow-hidden">
-            <TicketList tickets={tickets} onSelectTicket={setSelectedTicket} selectedTicketId={selectedTicket?.id} />
+            <TicketList 
+              tickets={tickets} 
+              onSelectTicket={setSelectedTicket} 
+              selectedTicketId={selectedTicket?.id}
+              onConnectToChat={handleConnectToChat}
+            />
             <ChatArea
               ticket={selectedTicket}
               onCloseTicket={handleCloseTicket}

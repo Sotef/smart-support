@@ -6,11 +6,12 @@ import { useEffect, useRef, useState } from "react"
 import type { Ticket, Message } from "@/lib/types"
 import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
-import { Phone, Mail, Send, Mic, Smile, Paperclip, Eye, X } from "lucide-react"
+import { Phone, Mail, Send, Mic, Smile, Paperclip, Eye, X, UserCheck, ChevronDown, Tag, Hash, BarChart3, TrendingUp, MessageCircle } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { useLanguage } from "@/lib/language-context"
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog"
 import { MessageContextMenu } from "@/components/message-context-menu"
+import { Badge } from "@/components/ui/badge"
 
 interface ChatAreaProps {
   ticket: Ticket | null
@@ -44,6 +45,8 @@ export function ChatArea({
   } | null>(null)
   const [replyingTo, setReplyingTo] = useState<Message | null>(null)
   const [editingMessage, setEditingMessage] = useState<{ id: string; text: string } | null>(null)
+  const [suggestionsExpanded, setSuggestionsExpanded] = useState(true)
+  const [analysisExpanded, setAnalysisExpanded] = useState(false)
 
   // Auto-scroll to bottom logic
   const scrollRef = useRef<HTMLDivElement | null>(null)
@@ -138,6 +141,62 @@ export function ChatArea({
               <p className="text-sm text-muted-foreground mt-1">
                 {ticket.subject} <span className="text-xs">({ticket.id})</span>
               </p>
+              
+              {/* Индикатор статуса подключения оператора */}
+              <div className="flex items-center gap-2 mt-2">
+                {ticket.status === 'started' && (
+                  <div className="flex items-center gap-1 text-xs text-green-600 bg-green-50 px-2 py-1 rounded-full">
+                    <UserCheck className="h-3 w-3" />
+                    <span>{isOperator ? 'Вы подключены к чату' : 'Оператор подключился'}</span>
+                  </div>
+                )}
+                {ticket.status === 'assigned' && !isOperator && (
+                  <div className="flex items-center gap-1 text-xs text-yellow-600 bg-yellow-50 px-2 py-1 rounded-full">
+                    <div className="h-2 w-2 bg-yellow-400 rounded-full animate-pulse" />
+                    <span>Ожидание оператора</span>
+                  </div>
+                )}
+              </div>
+              
+              {/* Отображаем категории для оператора */}
+              {isOperator && (
+                <div className="mt-2">
+                  {/* Всегда показываем блок категорий для оператора */}
+                  <div className="flex flex-wrap gap-2 items-center">
+                    <div className="flex items-center gap-1 text-xs text-muted-foreground">
+                      <Tag className="h-3 w-3" />
+                      <span>Категория:</span>
+                    </div>
+                    {ticket.categoryDisplay ? (
+                      <Badge variant="secondary" className="text-xs flex items-center gap-1">
+                        <Hash className="h-3 w-3" />
+                        {ticket.categoryDisplay}
+                      </Badge>
+                    ) : (
+                      <Badge variant="outline" className="text-xs text-muted-foreground">
+                        Не определена
+                      </Badge>
+                    )}
+                    
+                    {ticket.subcategoryDisplay && (
+                      <>
+                        <span className="text-xs text-muted-foreground">→</span>
+                        <Badge variant="outline" className="text-xs border-blue-300 text-blue-700 flex items-center gap-1">
+                          <Hash className="h-3 w-3" />
+                          {ticket.subcategoryDisplay}
+                        </Badge>
+                      </>
+                    )}
+                    
+                    {/* Показываем confidence score если есть */}
+                    {ticket.categoryConfidence && (
+                      <div className="text-xs text-muted-foreground ml-2">
+                        <span className="opacity-70">({Math.round(ticket.categoryConfidence * 100)}% уверенность)</span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
             </div>
           </div>
           <div className="flex items-center gap-2">
@@ -201,6 +260,126 @@ export function ChatArea({
           </div>
         </div>
       </div>
+
+      {/* Панель анализа сообщений для оператора */}
+      {isOperator && (
+        <div className="border-b border-border bg-muted/30">
+          <button
+            onClick={() => setAnalysisExpanded(!analysisExpanded)}
+            className="w-full p-3 flex items-center justify-between text-left hover:bg-muted/50 transition-colors"
+          >
+            <div className="flex items-center gap-2">
+              <BarChart3 className="h-4 w-4 text-muted-foreground" />
+              <span className="text-sm font-medium text-muted-foreground">
+                Анализ сообщений клиента
+              </span>
+              <span className="text-xs text-muted-foreground">
+                ({visibleMessages.filter(m => m.sender === 'client' && (m.categoryDisplay || m.category)).length} проанализировано)
+              </span>
+            </div>
+            <ChevronDown 
+              className={cn(
+                "h-4 w-4 text-muted-foreground transition-transform",
+                analysisExpanded ? "rotate-180" : ""
+              )}
+            />
+          </button>
+          {analysisExpanded && (
+            <div className="px-4 pb-4">
+              <div className="space-y-3 max-h-60 overflow-y-auto">
+                {visibleMessages
+                  .filter(msg => msg.sender === 'client')
+                  .map((msg, index) => (
+                    <div key={msg.id} className="bg-card border border-border rounded-lg p-3">
+                      <div className="flex items-start gap-3">
+                        <div className="flex-shrink-0">
+                          <div className="w-6 h-6 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center text-xs font-medium">
+                            {index + 1}
+                          </div>
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <div className="text-sm text-muted-foreground mb-2 truncate">
+                            «{msg.text.length > 60 ? msg.text.slice(0, 60) + '...' : msg.text}»
+                          </div>
+                          
+                          {/* Категории */}
+                          <div className="flex flex-wrap gap-1.5 items-center mb-2">
+                            {msg.categoryDisplay || msg.category ? (
+                              <>
+                                <Badge variant="secondary" className="text-xs flex items-center gap-1">
+                                  <Tag className="h-3 w-3" />
+                                  {msg.categoryDisplay || msg.category}
+                                </Badge>
+                                {(msg.subcategoryDisplay || msg.subcategory) && (
+                                  <>
+                                    <span className="text-xs text-muted-foreground">→</span>
+                                    <Badge variant="outline" className="text-xs border-blue-300 text-blue-700">
+                                      {msg.subcategoryDisplay || msg.subcategory}
+                                    </Badge>
+                                  </>
+                                )}
+                                {msg.categoryConfidence && (
+                                  <span className="text-xs text-muted-foreground">
+                                    {Math.round(msg.categoryConfidence * 100)}%
+                                  </span>
+                                )}
+                              </>
+                            ) : (
+                              <Badge variant="outline" className="text-xs text-muted-foreground">
+                                <MessageCircle className="h-3 w-3 mr-1" />
+                                Не категоризировано
+                              </Badge>
+                            )}
+                          </div>
+                          
+                          {/* Тональность и ключевые слова */}
+                          <div className="flex flex-wrap gap-1.5 items-center">
+                            {msg.sentiment && (
+                              <Badge 
+                                variant="outline" 
+                                className={cn(
+                                  "text-xs",
+                                  msg.sentiment === 'positive' && "border-green-300 text-green-700",
+                                  msg.sentiment === 'negative' && "border-red-300 text-red-700",
+                                  msg.sentiment === 'neutral' && "border-gray-300 text-gray-700"
+                                )}
+                              >
+                                <TrendingUp className="h-3 w-3 mr-1" />
+                                {msg.sentiment === 'positive' ? 'Позитивный' : 
+                                 msg.sentiment === 'negative' ? 'Негативный' : 
+                                 'Нейтральный'}
+                              </Badge>
+                            )}
+                            {msg.keywords && msg.keywords.length > 0 && (
+                              <div className="flex flex-wrap gap-1">
+                                {msg.keywords.slice(0, 3).map((keyword, i) => (
+                                  <span key={i} className="text-xs bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded">
+                                    {keyword}
+                                  </span>
+                                ))}
+                                {msg.keywords.length > 3 && (
+                                  <span className="text-xs text-muted-foreground">+{msg.keywords.length - 3}</span>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  ))
+                }
+                
+                {visibleMessages.filter(msg => msg.sender === 'client').length === 0 && (
+                  <div className="text-center py-6 text-muted-foreground">
+                    <MessageCircle className="h-8 w-8 mx-auto mb-2 opacity-50" />
+                    <p className="text-sm">Нет сообщений клиента для анализа</p>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Messages */}
       <div
@@ -302,21 +481,38 @@ export function ChatArea({
       <div className="border-t border-border p-4 bg-card">
         <div className="max-w-3xl mx-auto">
           {isOperator && suggestedResponses.length > 0 && (
-            <div className="mb-3 p-3 rounded-lg bg-primary/5 border border-primary/20">
-              <p className="text-xs font-medium text-muted-foreground mb-2">{t("suggestedResponses") || "Рекомендованные ответы"}</p>
-              <div className="flex flex-col gap-1.5">
-                {suggestedResponses.map((s, i) => (
-                  <Button
-                    key={i}
-                    size="sm"
-                    variant="ghost"
-                    className="justify-start text-left h-auto py-2 px-3 whitespace-normal"
-                    onClick={() => onSendMessage?.(s)}
-                  >
-                    {s}
-                  </Button>
-                ))}
-              </div>
+            <div className="mb-3 rounded-lg bg-primary/5 border border-primary/20">
+              <button
+                onClick={() => setSuggestionsExpanded(!suggestionsExpanded)}
+                className="w-full p-3 flex items-center justify-between text-left hover:bg-primary/10 transition-colors"
+              >
+                <p className="text-xs font-medium text-muted-foreground">
+                  {t("suggestedResponses") || "Рекомендованные ответы"} ({suggestedResponses.length})
+                </p>
+                <ChevronDown 
+                  className={cn(
+                    "h-4 w-4 text-muted-foreground transition-transform",
+                    suggestionsExpanded ? "rotate-180" : ""
+                  )}
+                />
+              </button>
+              {suggestionsExpanded && (
+                <div className="px-3 pb-3">
+                  <div className="flex flex-col gap-1.5">
+                    {suggestedResponses.map((s, i) => (
+                      <Button
+                        key={i}
+                        size="sm"
+                        variant="ghost"
+                        className="justify-start text-left h-auto py-2 px-3 whitespace-normal"
+                        onClick={() => onSendMessage?.(s)}
+                      >
+                        {s}
+                      </Button>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           )}
 

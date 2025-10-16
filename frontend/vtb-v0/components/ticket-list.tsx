@@ -17,7 +17,10 @@ export function TicketList({ tickets, onSelectTicket, selectedTicketId }: Ticket
   const { t } = useLanguage()
   const [activeTab, setActiveTab] = useState<TicketStatus>("assigned")
 
-  const filteredTickets = tickets.filter((ticket) => ticket.status === activeTab)
+  const priorityRank = { HIGH: 3, MEDIUM: 2, LOW: 1 } as const
+  const filteredTickets = tickets
+    .filter((ticket) => ticket.status === activeTab)
+    .sort((a, b) => (priorityRank[(b.priority as any) || 'MEDIUM'] - priorityRank[(a.priority as any) || 'MEDIUM']))
 
   const getTabCount = (status: TicketStatus) => {
     return tickets.filter((t) => t.status === status).length

@@ -23,6 +23,17 @@ from .websocket_manager import WebSocketManager
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+# Доп. файл-логгер
+try:
+    import logging.handlers, pathlib
+    pathlib.Path("logs").mkdir(parents=True, exist_ok=True)
+    fh = logging.handlers.RotatingFileHandler("logs/app.log", maxBytes=2_000_000, backupCount=3, encoding="utf-8")
+    fh.setLevel(logging.INFO)
+    fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    logging.getLogger().addHandler(fh)
+    logger.info("File logging enabled at logs/app.log")
+except Exception as _e:
+    logger.warning("File logging init failed: %s", _e)
 
 # Загружаем переменные окружения из .env при старте процесса (если файл присутствует)
 try:
@@ -114,9 +125,14 @@ class SessionStore:
             "sender": sender,
             "text": text,
             "timestamp": datetime.utcnow(),
+            "status": "sent",
+            "read_by": [],
         }
         if reply_to:
             msg["replyTo"] = reply_to
+        # Бот всегда "читает" клиентские сообщения
+        if sender == "client":
+            msg["read_by"].append("bot")
         s["messages"].append(msg)
         return msg
 
@@ -175,6 +191,41 @@ class TicketTracker:
 
 ticket_tracker = TicketTracker()
 
+def _ensure_user_columns():
+    try:
+        from sqlalchemy import text
+        db_url = os.getenv("DATABASE_URL", "sqlite:///data/app.db")
+        if db_url.startswith("sqlite"):
+            with engine.connect() as conn:
+                cols = [row[1] for row in conn.execute(text("PRAGMA table_info(users)"))]
+                to_add = []
+                if 'name' not in cols:
+                    to_add.append("ALTER TABLE users ADD COLUMN name VARCHAR(255)")
+                if 'phone' not in cols:
+                    to_add.append("ALTER TABLE users ADD COLUMN phone VARCHAR(64)")
+                if 'corporate_code' not in cols:
+                    to_add.append("ALTER TABLE users ADD COLUMN corporate_code VARCHAR(32)")
+                if 'operator_number' not in cols:
+                    to_add.append("ALTER TABLE users ADD COLUMN operator_number INTEGER")
+                for stmt in to_add:
+                    try:
+                        conn.execute(text(stmt))
+                    except Exception:
+                        pass
+                # indices
+                try:
+                    conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_operator_number ON users(operator_number)"))
+                except Exception:
+                    pass
+                try:
+                    conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_corporate_code ON users(corporate_code)"))
+                except Exception:
+                    pass
+                conn.commit()
+                logger.info("Ensured users table columns/indexes")
+    except Exception as e:
+        logger.warning(f"ensure_user_columns error: {e}")
+
 @app.on_event("startup")
 async def startup_event():
     """Инициализация при запуске"""
@@ -182,6 +233,7 @@ async def startup_event():
     # Инициализируем БД и создаём таблицы (если нет)
     try:
         Base.metadata.create_all(bind=engine)
+        _ensure_user_columns()
         logger.info("Database initialized")
     except Exception as _e:
         logger.error(f"DB init error: {_e}")
@@ -200,11 +252,156 @@ async def read_root():
     with open("static/index.html", "r", encoding="utf-8") as f:
         return HTMLResponse(content=f.read())
 
-# SPA fallback: обслуживаем index.html для любых путей, не начинающихся с API/статик
+@app.get("/api/health")
+async def health_check():
+    """
+    Проверка здоровья системы
+    """
+    return {
+        "status": "healthy",
+        "services": {
+            "scibox": await scibox_service.health_check(),
+            "knowledge_base": await knowledge_base.health_check()
+        }
+    }
+
+@app.get("/api/logs")
+async def get_logs(lines: int = 100, level: str = None):
+    """
+    Получение последних строк из лог-файла
+    
+    - **lines**: количество последних строк (по умолчанию 100)
+    - **level**: фильтр по уровню (INFO, WARNING, ERROR)
+    """
+    try:
+        log_path = "logs/app.log"
+        if not os.path.exists(log_path):
+            return {"logs": [], "message": "Log file not found"}
+        
+        with open(log_path, "r", encoding="utf-8") as f:
+            all_lines = f.readlines()
+        
+        # Получаем последние N строк
+        recent_lines = all_lines[-lines:] if len(all_lines) > lines else all_lines
+        
+        # Фильтрация по уровню, если указан
+        if level:
+            level_upper = level.upper()
+            recent_lines = [line for line in recent_lines if level_upper in line]
+        
+        return {
+            "logs": recent_lines,
+            "total_lines": len(all_lines),
+            "returned_lines": len(recent_lines)
+        }
+    except Exception as e:
+        logger.error(f"Error reading logs: {e}")
+        raise HTTPException(status_code=500, detail=f"Error reading logs: {str(e)}")
+
+@app.get("/api/logs/tail")
+async def get_logs_tail(lines: int = 50):
+    """
+    Получение последних строк логов в простом текстовом формате
+    
+    - **lines**: количество последних строк (по умолчанию 50)
+    """
+    from fastapi.responses import PlainTextResponse
+    try:
+        log_path = "logs/app.log"
+        if not os.path.exists(log_path):
+            return PlainTextResponse("Log file not found", status_code=404)
+        
+        with open(log_path, "r", encoding="utf-8") as f:
+            all_lines = f.readlines()
+        
+        recent_lines = all_lines[-lines:] if len(all_lines) > lines else all_lines
+        return PlainTextResponse("".join(recent_lines))
+    except Exception as e:
+        logger.error(f"Error reading logs: {e}")
+        return PlainTextResponse(f"Error reading logs: {str(e)}", status_code=500)
+
+# Критичные API endpoints - должны быть ПЕРЕД SPA fallback
+@app.get("/api/session/list")
+async def session_list():
+    items = session_store.list()
+    counts = {"assigned": 0, "started": 0, "solved": 0, "closed": 0}
+    for it in items:
+        st = it.get("status")
+        if st in counts:
+            counts[st] += 1
+    return {"items": items, "counts": counts}
+
+@app.get("/api/session/analytics")
+async def session_analytics():
+    """
+    Аналитика сессий с категоризацией
+    """
+    sessions = session_store.list()
+    analytics = []
+    
+    for s in sessions:
+        # Получаем первое сообщение клиента
+        client_msgs = [m for m in s.get("messages", []) if m.get("sender") == "client"]
+        first_msg = client_msgs[0] if client_msgs else None
+        
+        # Анализируем первое сообщение для категоризации
+        category = None
+        sentiment = None
+        keywords = []
+        
+        if first_msg:
+            try:
+                text = first_msg.get("text", "")
+                analysis = await scibox_service.analyze_text(text)
+                category = str(analysis.classification.value) if analysis.classification else None
+                sentiment = analysis.sentiment
+                keywords = analysis.keywords[:5] if analysis.keywords else []
+            except Exception as e:
+                logger.warning(f"Analytics analysis error: {e}")
+        
+        analytics.append({
+            "session_id": s.get("id"),
+            "subject": s.get("subject"),
+            "status": s.get("status"),
+            "created_at": s.get("created_at"),
+            "client_question": first_msg.get("text") if first_msg else None,
+            "category": category,
+            "sentiment": sentiment,
+            "keywords": keywords,
+            "messages_count": len(s.get("messages", [])),
+            "priority": s.get("priority"),
+        })
+    
+    # Статистика по категориям
+    category_stats = {}
+    for item in analytics:
+        cat = item.get("category") or "unknown"
+        category_stats[cat] = category_stats.get(cat, 0) + 1
+    
+    return {
+        "total_sessions": len(sessions),
+        "sessions": analytics,
+        "category_stats": category_stats
+    }
+
+@app.get("/api/session/{session_id}")
+async def session_get(session_id: str):
+    s = session_store.get(session_id)
+    if not s:
+        raise HTTPException(status_code=404, detail="session not found")
+    return s
+
+# SPA fallback: обслуживаем index.html для любых путей, не начинающихся с API/статик  
+# NOTE: Этот роут должен быть ПОСЛЕДНИМ, так как перехватывает все пути
 @app.get("/{full_path:path}", response_class=HTMLResponse)
 async def spa_fallback(full_path: str):
-    # Serve API/static/_next normally
-    if full_path.startswith("api/") or full_path.startswith("assets/") or full_path.startswith("static/") or full_path.startswith("_next/"):
+    # API роуты обрабатываются другими эндпоинтами - пропускаем
+    if full_path.startswith("api/"):
+        # Let FastAPI continue to other routes
+        raise HTTPException(status_code=404, detail="Not Found")
+    
+    # Статические ресурсы
+    if full_path.startswith(("assets/", "static/", "_next/")):
         raise HTTPException(status_code=404, detail="Not Found")
 
     # Try Next.js static-export routes first: 
@@ -370,7 +567,8 @@ async def kb_embeddings_rebuild():
     try:
         articles = knowledge_base.articles
         ids = [a.id for a in articles]
-        texts = [(a.title or "") + "\n" + (a.content or "") for a in articles]
+        # Индексируем формулировку вопроса (title) — а не ответ
+        texts = [(a.title or "") for a in articles]
         vecs = await scibox_service.embed_texts(texts)
         model = os.getenv("SCIBOX_EMBED_MODEL", os.getenv("MODEL_EMBED", "bge-m3"))
         path = os.getenv("VECTOR_INDEX_PATH", "data/kb_index.json")
@@ -392,7 +590,8 @@ async def kb_embeddings_upsert(payload: Dict[str, Any]):
         article = await knowledge_base.get_article_by_id(art_id)
         if not article:
             raise HTTPException(status_code=404, detail="Article not found")
-        txt = (article.title or "") + "\n" + (article.content or "")
+        # Индексируем только вопрос (title)
+        txt = (article.title or "")
         vec = (await scibox_service.embed_texts([txt]))[0]
         path = os.getenv("VECTOR_INDEX_PATH", "data/kb_index.json")
         vi = VectorIndex(path)
@@ -458,8 +657,16 @@ async def session_start(payload: Dict[str, Any]):
         description = (payload.get("description") or "").strip()
         if not description:
             raise HTTPException(status_code=400, detail="description required")
-        sid = session_store.create(client_id, subject, description)
+        
+        # Создаём сессию
+        try:
+            sid = session_store.create(client_id, subject, description)
+        except Exception as e:
+            logger.error(f"session_store.create error: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=f"Failed to create session: {str(e)}")
+        
         # Анализ первого сообщения и автоответ бота
+        suggestions = []
         req = SupportRequest(
             request_id=f"req_{uuid4().hex[:8]}",
             text=description,
@@ -471,22 +678,46 @@ async def session_start(payload: Dict[str, Any]):
             top = (resp.suggested_responses or [])[:1]
             if top:
                 session_store.add_message(sid, "bot", top[0])
-            suggestions = resp.suggested_responses
+            suggestions = resp.suggested_responses or []
         except Exception as _e:
-            logger.warning(f"session_start analyze fallback: {_e}")
-            suggestions = []
-        return {
-            "session_id": sid,
-            "subject": subject,
-            "status": session_store.get(sid)["status"],
-            "messages": session_store.get(sid)["messages"],
-            "suggested_responses": suggestions,
-        }
+            logger.warning(f"session_start analyze fallback: {_e}", exc_info=True)
+            # Добавляем дефолтное сообщение бота при ошибке анализа
+            try:
+                session_store.add_message(sid, "bot", "Здравствуйте! Ваш вопрос принят. Оператор ответит в ближайшее время.")
+            except Exception:
+                pass
+        
+        # RT уведомление для операторов о новой сессии
+        try:
+            await websocket_manager.broadcast({
+                "type": "session_started",
+                "session": session_store.get(sid)
+            })
+        except Exception as ws_e:
+            logger.warning(f"websocket broadcast failed: {ws_e}")
+        
+        # Получаем актуальную сессию
+        try:
+            session = session_store.get(sid)
+            if not session:
+                raise Exception(f"Session {sid} not found after creation")
+            
+            return {
+                "session_id": sid,
+                "subject": subject,
+                "status": session.get("status", "assigned"),
+                "messages": session.get("messages", []),
+                "suggested_responses": suggestions,
+            }
+        except Exception as e:
+            logger.error(f"session_start get session error: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=f"Session created but failed to retrieve: {str(e)}")
+            
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"session_start error: {e}")
-        raise HTTPException(status_code=500, detail="session_start failed")
+        logger.error(f"session_start unexpected error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
 
 @app.post("/api/message/send")
 async def message_send(payload: Dict[str, Any]):
@@ -500,7 +731,17 @@ async def message_send(payload: Dict[str, Any]):
         s = session_store.get(sid)
         if not s:
             raise HTTPException(status_code=404, detail="session not found")
-        session_store.add_message(sid, sender, text, reply_to)
+        msg = session_store.add_message(sid, sender, text, reply_to)
+
+        # RT уведомление операторам о новом сообщении
+        try:
+            await websocket_manager.broadcast({
+                "type": "message_created",
+                "session_id": sid,
+                "message": msg,
+            })
+        except Exception:
+            pass
 
         suggestions: List[str] = []
         operator_requested = False
@@ -525,7 +766,17 @@ async def message_send(payload: Dict[str, Any]):
                 # Негативный тон до 3 вопросов — эскалация
                 if len(client_msgs) <= 3 and (resp.sentiment_score or 0) < -0.3:
                     escalate = True
-                # Автоответ бота
+                # Приоритет сессии
+                try:
+                    s["priority"] = (resp.recommendations or {}).get("priority") or s.get("priority")
+                except Exception:
+                    pass
+                # Логируем категории/тональность/приоритет
+                try:
+                    logger.info(f"msg_user sid={sid} cat={resp.kb_category or resp.classification} sub={resp.kb_subcategory} tone={resp.tone_label} priority={(resp.recommendations or {}).get('priority')}")
+                except Exception:
+                    pass
+                # Автоответ бота после каждого сообщения клиента
                 if suggestions:
                     session_store.add_message(sid, "bot", suggestions[0])
             except Exception as _e:
@@ -545,7 +796,35 @@ async def message_send(payload: Dict[str, Any]):
                 except Exception:
                     pass
         else:
-            # Сообщение от оператора: можно предложить доп. ответы из анализа
+            # Сообщение от оператора: добавляем системное сообщение при первом присоединении
+            operator_msgs = [m for m in s["messages"] if m.get("sender") == "operator"]
+            if len(operator_msgs) == 1:  # Первое сообщение оператора (только что добавили)
+                # Видно оператору — инструкция
+                system_msg_op = "Процедура рассмотрения жалоб:\n1. Зафиксируйте жалобу в системе\n2. Уведомите клиента о регистрации\n3. Проведите расследование\n4. Предоставьте ответ в установленные сроки"
+                s["messages"].append({
+                    "id": f"m_{uuid4().hex[:8]}",
+                    "sender": "system",
+                    "text": system_msg_op,
+                    "timestamp": datetime.utcnow(),
+                    "visible_to": "operator",
+                })
+                # Видно клиенту — уведомление о присоединении оператора
+                s["messages"].append({
+                    "id": f"m_{uuid4().hex[:8]}",
+                    "sender": "system",
+                    "text": "Sys: Оператор присоединился",
+                    "timestamp": datetime.utcnow(),
+                    "visible_to": "client",
+                })
+                try:
+                    await websocket_manager.broadcast({
+                        "type": "message_created",
+                        "session_id": sid,
+                        "message": {"sender":"system","text":"Sys: Оператор присоединился"}
+                    })
+                except Exception:
+                    pass
+            # Предложить доп. ответы из анализа
             req = SupportRequest(
                 request_id=f"req_{uuid4().hex[:8]}",
                 text=text,
@@ -588,22 +867,48 @@ async def session_close(payload: Dict[str, Any]):
         logger.error(f"session_close error: {e}")
         raise HTTPException(status_code=500, detail="session_close failed")
 
-@app.get("/api/session/{session_id}")
-async def session_get(session_id: str):
-    s = session_store.get(session_id)
-    if not s:
-        raise HTTPException(status_code=404, detail="session not found")
-    return s
+# Эти эндпоинты перенесены выше SPA fallback
 
-@app.get("/api/session/list")
-async def session_list():
-    items = session_store.list()
-    counts = {"assigned": 0, "started": 0, "solved": 0, "closed": 0}
-    for it in items:
-        st = it.get("status")
-        if st in counts:
-            counts[st] += 1
-    return {"items": items, "counts": counts}
+@app.post("/api/message/read")
+async def message_read(payload: Dict[str, Any]):
+    try:
+        sid = str(payload.get("session_id") or "")
+        reader = str(payload.get("reader") or "")  # client | operator | bot
+        up_to_id = payload.get("up_to_id")
+        if not sid or reader not in ("client","operator","bot"):
+            raise HTTPException(status_code=400, detail="session_id, valid reader required")
+        s = session_store.get(sid)
+        if not s:
+            raise HTTPException(status_code=404, detail="session not found")
+        ids_marked = []
+        for m in s["messages"]:
+            if up_to_id and m["id"] == up_to_id:
+                # mark this and all previous
+                if reader not in m.get("read_by", []):
+                    m.setdefault("read_by", []).append(reader)
+                    ids_marked.append(m["id"])
+                break
+            # mark progressively (skip messages от самого reader)
+            if m.get("sender") != reader:
+                if reader not in m.get("read_by", []):
+                    m.setdefault("read_by", []).append(reader)
+                    ids_marked.append(m["id"])
+        # WS уведомление о прочтении
+        try:
+            await websocket_manager.broadcast({
+                "type": "message_read",
+                "session_id": sid,
+                "reader": reader,
+                "message_ids": ids_marked,
+            })
+        except Exception:
+            pass
+        return {"session_id": sid, "reader": reader, "marked": ids_marked}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"message_read error: {e}")
+        raise HTTPException(status_code=500, detail="message_read failed")
 
 @app.post("/api/message/edit")
 async def message_edit(payload: Dict[str, Any]):
@@ -693,19 +998,6 @@ async def analyze_and_notify(request_data: Dict, client_id: str):
             "type": "error",
             "message": str(e)
         }, client_id)
-
-@app.get("/health")
-async def health_check():
-    """
-    Проверка здоровья системы
-    """
-    return {
-        "status": "healthy",
-        "services": {
-            "scibox": await scibox_service.health_check(),
-            "knowledge_base": await knowledge_base.health_check()
-        }
-    }
 
 if __name__ == "__main__":
     import uvicorn

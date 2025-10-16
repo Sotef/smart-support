@@ -29,16 +29,20 @@ export default function ClientPage() {
     preview: (s.messages?.[0]?.text) || '',
     status: (s.status || 'assigned') as any,
     createdAt: new Date(s.created_at || Date.now()),
-    messages: (s.messages || []).map((m: any) => ({
-      id: m.id,
-      text: m.text,
-      sender: (m.sender === 'bot' ? 'operator' : m.sender),
-      timestamp: new Date(m.timestamp || Date.now()),
-      deleted: m.deleted,
-      deletedAt: m.deletedAt ? new Date(m.deletedAt) : undefined,
-      replyTo: m.replyTo,
-      editHistory: m.editHistory,
-    })),
+    messages: (s.messages || [])
+      .filter((m: any) => !m.visible_to || m.visible_to === 'client' || m.visible_to === 'all')
+      .map((m: any) => ({
+        id: m.id,
+        text: m.text,
+        sender: m.sender,
+        timestamp: new Date(m.timestamp || Date.now()),
+        deleted: m.deleted,
+        deletedAt: m.deletedAt ? new Date(m.deletedAt) : undefined,
+        replyTo: m.replyTo,
+        editHistory: m.editHistory,
+        status: m.status || 'sent',
+        readBy: m.read_by || [],
+      })),
   })
 
   const refreshSessions = async () => {
@@ -53,6 +57,13 @@ export default function ClientPage() {
   }
 
 useEffect(() => { refreshSessions() }, [])
+
+  // mark reads when viewing chat
+  useEffect(() => {
+    if (selectedTicket) {
+      fetch('/api/message/read', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: selectedTicket.id, reader: 'client' }) })
+    }
+  }, [selectedTicket?.id, selectedTicket?.messages?.length])
   const [isDialogOpen, setIsDialogOpen] = useState(false)
   const [newQuestion, setNewQuestion] = useState({ subject: "", description: "" })
   const [creating, setCreating] = useState(false)
@@ -76,6 +87,13 @@ useEffect(() => { refreshSessions() }, [])
 
   const handleSendMessage = async (message: string) => {
     if (!selectedTicket) return
+    // optimistic append
+    const tempId = `temp_${Date.now()}`
+    const optimisticMsg = { id: tempId, text: message, sender: 'client' as const, timestamp: new Date(), status: 'sending' as const, readBy: ['client'] as any }
+    const optimisticTicket: Ticket = { ...selectedTicket, messages: [...selectedTicket.messages, optimisticMsg] }
+    setSelectedTicket(optimisticTicket)
+    setTickets((prev) => prev.map((t) => (t.id === optimisticTicket.id ? optimisticTicket : t)))
+
     try {
       const resp = await fetch('/api/message/send', {
         method: 'POST',
@@ -87,6 +105,8 @@ useEffect(() => { refreshSessions() }, [])
         const updated = mapSessionToTicket({ id: selectedTicket.id, subject: selectedTicket.subject, status: data.status, messages: data.messages })
         setSelectedTicket(updated)
         setTickets((prev) => prev.map((t) => (t.id === updated.id ? updated : t)))
+        // mark bot read already handled on server; mark client reads
+        fetch('/api/message/read', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: selectedTicket.id, reader: 'client' }) })
       }
     } catch {}
   }
@@ -101,7 +121,16 @@ useEffect(() => { refreshSessions() }, [])
         body: JSON.stringify({ client_id: 'client_demo', subject: newQuestion.subject, description: newQuestion.description }),
       })
       if (!resp.ok) {
-        console.error('session/start failed', resp.status)
+        const errorText = await resp.text().catch(() => '')
+        console.error('session/start failed', resp.status, errorText)
+        let errorDetail = ''
+        try {
+          const errorJson = JSON.parse(errorText)
+          errorDetail = errorJson.detail || errorText
+        } catch {
+          errorDetail = errorText || `HTTP ${resp.status}`
+        }
+        alert(`Failed to create question: ${errorDetail}`)
         setCreating(false)
         return
       }
@@ -114,6 +143,7 @@ useEffect(() => { refreshSessions() }, [])
       setNewQuestion({ subject: '', description: '' })
     } catch (e) {
       console.error('session/start error', e)
+      alert(`Error creating question: ${e instanceof Error ? e.message : String(e)}`)
     } finally {
       setCreating(false)
     }
@@ -182,6 +212,13 @@ useEffect(() => { refreshSessions() }, [])
                     placeholder={t("questionSubject")}
                     value={newQuestion.subject}
                     onChange={(e) => setNewQuestion({ ...newQuestion, subject: e.target.value })}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault()
+                        // В поле subject Enter переходит к description
+                        document.getElementById('description')?.focus()
+                      }
+                    }}
                   />
                 </div>
                 <div className="space-y-2">
@@ -192,7 +229,17 @@ useEffect(() => { refreshSessions() }, [])
                     value={newQuestion.description}
                     onChange={(e) => setNewQuestion({ ...newQuestion, description: e.target.value })}
                     className="min-h-[120px]"
+                    onKeyDown={(e) => {
+                      // Ctrl+Enter или Cmd+Enter отправляет форму
+                      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+                        e.preventDefault()
+                        if (newQuestion.subject.trim() && newQuestion.description.trim() && !creating) {
+                          handleCreateQuestion()
+                        }
+                      }
+                    }}
                   />
+                  <p className="text-xs text-muted-foreground">Ctrl+Enter для отправки</p>
                 </div>
                 <Button onClick={handleCreateQuestion} className="w-full" disabled={creating}>
                   {creating ? '...' : t("submit")}

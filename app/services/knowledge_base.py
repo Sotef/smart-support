@@ -109,6 +109,42 @@ class KnowledgeBaseService:
                     "Оцените приоритет",
                     "Передайте разработчикам"
                 ]
+            },
+            {
+                "id": "pension_001",
+                "title": "Льготы и услуги для пенсионеров",
+                "content": "Специальные условия для пенсионеров ВТБ:\n1. Бесплатное обслуживание карты 'Мир'\n2. Повышенная ставка по вкладам - до 18% годовых\n3. Льготные условия по кредитам\n4. Бесплатные переводы внутри банка\n5. Консультации по телефону 8-800 без комиссии\n6. Приоритетное обслуживание в отделениях",
+                "category": RequestCategory.GENERAL,
+                "tags": ["пенсионер", "льготы", "пенсия", "скидки", "вклад", "карта мир"],
+                "solutions": [
+                    "Оформите карту 'Мир' с бесплатным обслуживанием",
+                    "Откройте вклад с повышенной ставкой",
+                    "Получите консультацию по телефону 8-800-100-24-24"
+                ]
+            },
+            {
+                "id": "pension_002",
+                "title": "Оформление пенсионной карты",
+                "content": "Как получить карту для пенсионеров:\n1. Приходите в любое отделение ВТБ с паспортом и пенсионным удостоверением\n2. Заполните заявление (поможет сотрудник)\n3. Карта будет готова в течение 3-5 рабочих дней\n4. Бесплатное обслуживание + кэшбэк 2% на все покупки\n5. Автоматическое зачисление пенсии",
+                "category": RequestCategory.ACCOUNT,
+                "tags": ["карта", "пенсионер", "оформление", "пенсия", "мир"],
+                "solutions": [
+                    "Найдите ближайшее отделение на сайте vtb.ru",
+                    "Запишитесь на приём через приложение",
+                    "Позвоните 8-800-100-24-24 для консультации"
+                ]
+            },
+            {
+                "id": "password_001",
+                "title": "Восстановление пароля от личного кабинета",
+                "content": "Если забыли пароль:\n1. Нажмите 'Забыли пароль?' на странице входа\n2. Введите номер телефона или email\n3. Получите СМС с кодом подтверждения\n4. Создайте новый пароль (минимум 8 символов)\n5. Войдите с новым паролем\nЕсли не приходит СМС - позвоните 8-800-100-24-24",
+                "category": RequestCategory.ACCOUNT,
+                "tags": ["пароль", "забыл", "восстановление", "вход", "смс", "код"],
+                "solutions": [
+                    "Используйте функцию 'Забыли пароль?'",
+                    "Проверьте СМС и email",
+                    "Позвоните в поддержку для помощи"
+                ]
             }
         ]
 
@@ -128,19 +164,10 @@ class KnowledgeBaseService:
                 else:
                     logger.warning("Не удалось загрузить Excel, используем синтетическую базу знаний")
 
-            # Fallback: синтетические данные
-            for article_data in self.synthetic_articles:
-                article = KnowledgeBaseArticle(
-                    id=article_data["id"],
-                    title=article_data["title"],
-                    content=article_data["content"],
-                    category=article_data["category"],
-                    tags=article_data["tags"]
-                )
-                self.articles.append(article)
-
-            self.initialized = True
-            logger.info(f"База знаний инициализирована (synthetic): {len(self.articles)} статей")
+            # Синтетическая база отключена по требованиям — если Excel не задан/не загружен, не инициализируем
+            logger.error("Knowledge Base Excel не задан или не загружен. Синтетическая база отключена.")
+            self.initialized = False
+            return
 
         except Exception as e:
             logger.error(f"Ошибка инициализации базы знаний: {str(e)}")
@@ -180,18 +207,7 @@ class KnowledgeBaseService:
             # Сортируем по релевантности
             results.sort(key=lambda x: x["relevance_score"], reverse=True)
             if not results:
-                # Фолбэк: если ничего не найдено, вернуть первые N статей (для демонстрации)
-                fallback = []
-                for article in self.articles[:limit]:
-                    fallback.append({
-                        "id": article.id,
-                        "title": article.title,
-                        "content": article.content,
-                        "category": article.category.value,
-                        "tags": article.tags,
-                        "relevance_score": 0.1,
-                    })
-                return fallback
+                return []
             return results[:limit]
             
         except Exception as e:

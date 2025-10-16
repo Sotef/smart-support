@@ -85,15 +85,25 @@ class SciboxService:
         try:
             self.client = httpx.AsyncClient(timeout=30.0)
             
-            # Проверяем доступность Scibox (в реальной интеграции)
+            # Проверяем доступность основного Scibox API через простой запрос
             try:
-                response = await self.client.get(f"{self.scibox_url}/health")
+                headers = self._auth_headers()
+                # Проверяем основной API endpoint вместо старого health
+                test_payload = {"model": self.embed_model, "input": ["test"]}
+                response = await self.client.post(
+                    f"{self.embed_base_url}/embeddings",
+                    headers=headers,
+                    json=test_payload,
+                    timeout=10.0
+                )
                 if response.status_code == 200:
-                    logger.info("Подключение к Scibox установлено")
+                    logger.info(f"Подключение к Scibox API установлено ({self.embed_base_url})")
+                elif response.status_code == 401:
+                    logger.warning("Scibox API: неверный ключ авторизации, используем синтетические данные")
                 else:
-                    logger.warning("Scibox недоступен, используем синтетические данные")
-            except:
-                logger.info("Работаем с синтетическими данными (Scibox не подключен)")
+                    logger.warning(f"Scibox API вернул {response.status_code}, используем синтетические данные")
+            except Exception as e:
+                logger.info(f"Работаем с синтетическими данными (Scibox API недоступен: {e})")
             
             self.initialized = True
             logger.info("SciboxService инициализирован")
@@ -108,14 +118,15 @@ class SciboxService:
         Анализ текста через Scibox с извлечением сущностей и классификацией
         """
         try:
-            # Попытка реальной интеграции с Scibox
-            if self.client:
-                try:
-                    response = await self._call_scibox_api(text)
-                    if response:
-                        return response
-                except Exception as e:
-                    logger.warning(f"Ошибка вызова Scibox API: {str(e)}")
+            # TEMPORARY FIX: Skip Chat API due to timeout issues, use synthetic analysis
+            # TODO: Fix Chat API timeout
+            # if self.client:
+            #     try:
+            #         response = await self._call_scibox_api(text)
+            #         if response:
+            #             return response
+            #     except Exception as e:
+            #         logger.warning(f"Ошибка вызова Scibox API: {str(e)}")
             
             # Fallback: синтетический анализ
             return await self._synthetic_analysis(text)
@@ -216,7 +227,7 @@ class SciboxService:
                 return None
             return self._parse_scibox_response(parsed, text)
         except Exception as e:
-            logger.error(f"Ошибка вызова Scibox Chat API: {str(e)}")
+            logger.error(f"Ошибка вызова Scibox Chat API: {str(e)}", exc_info=True)
             return None
 
     def _parse_scibox_response(self, data: Dict, original_text: str) -> AnalysisResult:

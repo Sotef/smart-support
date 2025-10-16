@@ -19,13 +19,32 @@ export default function OperatorLoginPage() {
     email: "",
     password: "",
     name: "",
-    employeeId: "",
+    corporateCode: "",
   })
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
-    console.log("[v0] Operator form submitted:", formData)
-    // Backend will handle authentication
+    try {
+      if (isLogin) {
+        const params = new URLSearchParams()
+        params.set('username', formData.email)
+        params.set('password', formData.password)
+        const resp = await fetch('/auth/login', { method: 'POST', body: params })
+        if (resp.ok) {
+          location.href = '/operator'
+        }
+      } else {
+        const resp = await fetch('/auth/register', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: formData.email, password: formData.password, role: 'operator', name: formData.name, corporate_code: formData.corporateCode }) })
+        if (resp.ok) {
+          location.href = '/operator'
+        } else {
+          // если код/почта заняты — переключаем на вход
+          setIsLogin(true)
+        }
+      }
+    } catch {
+      setIsLogin(true)
+    }
   }
 
   return (
@@ -65,12 +84,12 @@ export default function OperatorLoginPage() {
                 </div>
 
                 <div className="space-y-2">
-                  <Label htmlFor="employeeId">{t("employeeId")}</Label>
+                  <Label htmlFor="corporateCode">Корп. код (VTB******)</Label>
                   <Input
-                    id="employeeId"
-                    placeholder="EMP12345"
-                    value={formData.employeeId}
-                    onChange={(e) => setFormData({ ...formData, employeeId: e.target.value })}
+                    id="corporateCode"
+                    placeholder="VTB123456"
+                    value={formData.corporateCode}
+                    onChange={(e) => setFormData({ ...formData, corporateCode: e.target.value })}
                     required
                   />
                 </div>

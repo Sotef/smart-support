@@ -2,7 +2,7 @@
 
 import type React from "react"
 
-import { useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import type { Ticket, Message } from "@/lib/types"
 import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
@@ -44,6 +44,28 @@ export function ChatArea({
   } | null>(null)
   const [replyingTo, setReplyingTo] = useState<Message | null>(null)
   const [editingMessage, setEditingMessage] = useState<{ id: string; text: string } | null>(null)
+
+  // Auto-scroll to bottom logic
+  const scrollRef = useRef<HTMLDivElement | null>(null)
+  const bottomRef = useRef<HTMLDivElement | null>(null)
+  const [autoScroll, setAutoScroll] = useState(true)
+
+  const scrollToBottom = (behavior: ScrollBehavior = 'auto') => {
+    bottomRef.current?.scrollIntoView({ behavior })
+  }
+
+  // Re-attach autoscroll when ticket changes
+  useEffect(() => {
+    setAutoScroll(true)
+    // wait for render
+    const id = requestAnimationFrame(() => scrollToBottom('auto'))
+    return () => cancelAnimationFrame(id)
+  }, [ticket?.id])
+
+  // Scroll when new messages arrive if autoscroll is enabled
+  useEffect(() => {
+    if (autoScroll) scrollToBottom('auto')
+  }, [ticket?.messages?.length])
 
   if (!ticket) {
     return (
@@ -181,7 +203,15 @@ export function ChatArea({
       </div>
 
       {/* Messages */}
-      <div className="flex-1 overflow-y-auto p-6">
+      <div
+        className="flex-1 overflow-y-auto p-6"
+        ref={scrollRef}
+        onScroll={(e) => {
+          const el = e.currentTarget
+          const isAtBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 8
+          setAutoScroll(isAtBottom)
+        }}
+      >
         <div className="max-w-3xl mx-auto space-y-4">
           <div className="text-center text-xs text-muted-foreground mb-6">
             {t("today")}{" "}
@@ -206,6 +236,8 @@ export function ChatArea({
                       ? "bg-foreground text-background"
                       : msg.sender === "bot"
                       ? "bg-primary/10 text-foreground"
+                      : msg.sender === "system"
+                      ? "bg-yellow-50 dark:bg-yellow-900/20 text-foreground border border-yellow-200 dark:border-yellow-800"
                       : "bg-muted text-foreground",
                   )}
                   onContextMenu={(e) => handleContextMenu(e, msg)}
@@ -223,6 +255,23 @@ export function ChatArea({
                         minute: "2-digit",
                       })}
                     </span>
+                    {/* sent/read ticks for own messages */}
+                    {((isOperator && msg.sender === 'operator') || (!isOperator && msg.sender === 'client')) && (
+                      <span className="flex items-center gap-1">
+                        {/* one tick: sent */}
+                        <span title="Отправлено">✓</span>
+                        {/* two ticks: read (by bot or operator/client accordingly) */}
+                        {(() => {
+                          const readBy = msg.readBy || []
+                          // if operator is present (there is any operator message in ticket), require operator read; else allow bot read
+                          const operatorPresent = ticket.messages.some(m => m.sender === 'operator')
+                          const read = isOperator
+                            ? readBy.includes('client')
+                            : (operatorPresent ? readBy.includes('operator') : readBy.includes('bot'))
+                          return read ? <span title="Прочитано">✓</span> : null
+                        })()}
+                      </span>
+                    )}
                     {msg.editHistory && msg.editHistory.length > 0 && (
                       <span className="italic">({t("editedMessage")})</span>
                     )}
@@ -232,21 +281,8 @@ export function ChatArea({
             </div>
           ))}
 
-          {isOperator && suggestedResponses.length > 0 && (
-            <div className="flex justify-start">
-              <div className="max-w-[70%] rounded-2xl px-4 py-3 bg-primary/10 text-foreground">
-                <p className="text-sm leading-relaxed mb-2">{t("chatbotMessage")}</p>
-                <div className="flex flex-col gap-2">
-                  {suggestedResponses.map((s, i) => (
-                    <Button key={i} size="sm" variant="secondary" className="justify-start whitespace-pre-wrap"
-                      onClick={() => onSendMessage?.(s)}>
-                      {s}
-                    </Button>
-                  ))}
-                </div>
-              </div>
-            </div>
-          )}
+          {/* Bottom sentinel for autoscroll */}
+          <div ref={bottomRef} />
         </div>
       </div>
 
@@ -265,6 +301,25 @@ export function ChatArea({
       {/* Input Area */}
       <div className="border-t border-border p-4 bg-card">
         <div className="max-w-3xl mx-auto">
+          {isOperator && suggestedResponses.length > 0 && (
+            <div className="mb-3 p-3 rounded-lg bg-primary/5 border border-primary/20">
+              <p className="text-xs font-medium text-muted-foreground mb-2">{t("suggestedResponses") || "Рекомендованные ответы"}</p>
+              <div className="flex flex-col gap-1.5">
+                {suggestedResponses.map((s, i) => (
+                  <Button
+                    key={i}
+                    size="sm"
+                    variant="ghost"
+                    className="justify-start text-left h-auto py-2 px-3 whitespace-normal"
+                    onClick={() => onSendMessage?.(s)}
+                  >
+                    {s}
+                  </Button>
+                ))}
+              </div>
+            </div>
+          )}
+
           {!isOperator && ticket.status === "solved" && (
             <div className="mb-4 flex gap-2">
               <Button variant="default" className="flex-1" onClick={() => onResolveTicket(true)}>

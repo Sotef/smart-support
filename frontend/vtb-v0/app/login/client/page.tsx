@@ -22,10 +22,28 @@ export default function ClientLoginPage() {
     phone: "",
   })
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
-    console.log("[v0] Client form submitted:", formData)
-    // Backend will handle authentication
+    try {
+      if (isLogin) {
+        const params = new URLSearchParams()
+        params.set('username', formData.email)
+        params.set('password', formData.password)
+        const resp = await fetch('/auth/login', { method: 'POST', body: params })
+        if (resp.ok) {
+          location.href = '/client'
+        }
+      } else {
+        const resp = await fetch('/auth/register', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: formData.email, password: formData.password, role: 'client', name: formData.name, phone: formData.phone }) })
+        if (resp.ok) {
+          location.href = '/client'
+        } else {
+          setIsLogin(true)
+        }
+      }
+    } catch {
+      setIsLogin(true)
+    }
   }
 
   return (

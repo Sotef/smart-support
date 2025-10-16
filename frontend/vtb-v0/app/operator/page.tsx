@@ -19,16 +19,20 @@ export default function OperatorPage() {
   const [lastRequestId, setLastRequestId] = useState<string | null>(null)
 
   const mapSessionToTicket = (s: any): Ticket => {
-    const msgs: Message[] = (s.messages || []).map((m: any) => ({
-      id: m.id,
-      text: m.text,
-      sender: (m.sender === 'bot' ? 'operator' : m.sender),
-      timestamp: new Date(m.timestamp || Date.now()),
-      deleted: m.deleted,
-      deletedAt: m.deletedAt ? new Date(m.deletedAt) : undefined,
-      replyTo: m.replyTo,
-      editHistory: m.editHistory,
-    }))
+    const msgs: Message[] = (s.messages || [])
+      .filter((m: any) => !m.visible_to || m.visible_to === 'operator' || m.visible_to === 'all')
+      .map((m: any) => ({
+        id: m.id,
+        text: m.text,
+        sender: m.sender,
+        timestamp: new Date(m.timestamp || Date.now()),
+        deleted: m.deleted,
+        deletedAt: m.deletedAt ? new Date(m.deletedAt) : undefined,
+        replyTo: m.replyTo,
+        editHistory: m.editHistory,
+        status: m.status || 'sent',
+        readBy: m.read_by || [],
+      }))
     return {
       id: s.id,
       clientName: s.client_id || 'Client',
@@ -38,6 +42,7 @@ export default function OperatorPage() {
       status: (s.status || 'assigned') as any,
       createdAt: new Date(s.created_at || Date.now()),
       messages: msgs,
+      priority: (s.priority as any) || 'MEDIUM',
     }
   }
 
@@ -51,10 +56,32 @@ export default function OperatorPage() {
     } catch {}
   }
 
-// initial load
+// initial load + WebSocket RT обновления
   useEffect(() => {
     refreshSessions()
+    // RT: подписка на события сервера
+    try {
+      const proto = typeof window !== 'undefined' && window.location.protocol === 'https:' ? 'wss' : 'ws'
+      const host = typeof window !== 'undefined' ? window.location.hostname : 'localhost'
+      const ws = new WebSocket(`${proto}://${host}:8001/ws/operator_dashboard`)
+      ws.onmessage = (ev) => {
+        try {
+          const msg = JSON.parse(ev.data)
+          if (msg.type === 'session_started' || msg.type === 'message_created' || msg.type === 'analysis_complete' || msg.type === 'message_read') {
+            refreshSessions()
+          }
+        } catch {}
+      }
+      return () => ws.close()
+    } catch {}
   }, [])
+
+  // mark reads when viewing a ticket
+  useEffect(() => {
+    if (selectedTicket?.id) {
+      fetch('/api/message/read', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: selectedTicket.id, reader: 'operator' }) })
+    }
+  }, [selectedTicket?.id, selectedTicket?.messages?.length])
 
   const handleCloseTicket = async () => {
     if (!selectedTicket) return
@@ -75,7 +102,21 @@ export default function OperatorPage() {
 
   const handleSendMessage = async (message: string, replyToId?: string) => {
     if (!selectedTicket) return
-    // send to backend
+    // optimistic append
+    const tempId = `temp_${Date.now()}`
+    const optimistic: Message = {
+      id: tempId,
+      text: message,
+      sender: 'operator',
+      timestamp: new Date(),
+      status: 'sending',
+      readBy: ['operator'],
+      replyTo: replyToId,
+    }
+    const optimisticTicket: Ticket = { ...selectedTicket, messages: [...selectedTicket.messages, optimistic] }
+    setSelectedTicket(optimisticTicket)
+    setTickets((prev) => prev.map((t) => (t.id === optimisticTicket.id ? optimisticTicket : t)))
+
     try {
       const resp = await fetch('/api/message/send', {
         method: 'POST',
@@ -88,6 +129,8 @@ export default function OperatorPage() {
         setSelectedTicket(updated)
         setTickets((prev) => prev.map((t) => (t.id === updated.id ? updated : t)))
         setSuggested(data.suggested_responses || [])
+        // mark as read by operator on arrival
+        fetch('/api/message/read', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: selectedTicket.id, reader: 'operator' }) })
       }
     } catch {}
   }

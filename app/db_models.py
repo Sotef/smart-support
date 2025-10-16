@@ -15,6 +15,10 @@ class User(Base):
     email = Column(String(255), unique=True, index=True, nullable=False)
     password_hash = Column(String(255), nullable=False)
     role = Column(SQLEnum(UserRole), nullable=False, index=True)
+    name = Column(String(255), nullable=True)
+    phone = Column(String(64), nullable=True)
+    corporate_code = Column(String(32), unique=True, nullable=True)
+    operator_number = Column(Integer, unique=True, nullable=True, index=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 class SessionStatus(str, Enum):

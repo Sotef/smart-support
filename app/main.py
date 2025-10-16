@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Depends, WebSocket, WebSocketDisconnect, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, FileResponse
@@ -15,7 +15,9 @@ from .services.scibox_service import SciboxService
 from .services.knowledge_base import KnowledgeBaseService
 from .services.recommendation_engine import RecommendationEngine
 from .services.vector_index import VectorIndex
-from .database import get_db
+from .database import get_db as get_db_placeholder
+from .db import Base, engine, get_db
+from .auth import router as auth_router
 from .websocket_manager import WebSocketManager
 
 # Настройка логирования
@@ -40,6 +42,9 @@ app = FastAPI(
     version="1.0.0"
 )
 
+# Маршруты аутентификации
+app.include_router(auth_router)
+
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,
@@ -53,6 +58,8 @@ app.add_middleware(
 app.mount("/static", StaticFiles(directory="static"), name="static")
 # Путь для Vite-артефактов из сборки (assets/*)
 app.mount("/assets", StaticFiles(directory="static/assets"), name="assets")
+# Путь для Next.js export (_next/*)
+app.mount("/_next", StaticFiles(directory="static/_next"), name="_next")
 
 # Инициализация сервисов
 _scibox_url = os.getenv("SCIBOX_URL", "http://localhost:8001")
@@ -60,6 +67,68 @@ scibox_service = SciboxService(scibox_url=_scibox_url)
 knowledge_base = KnowledgeBaseService()
 recommendation_engine = RecommendationEngine(knowledge_base, scibox_service)
 websocket_manager = WebSocketManager()
+
+# Переключатель сохранения логов (для тестов можно не сохранять)
+SAVE_LOGS = os.getenv("SAVE_LOGS", "0").lower() in ("1", "true", "yes")
+
+# In-memory Session Store
+from datetime import datetime
+from uuid import uuid4
+
+class SessionStore:
+    def __init__(self):
+        self.sessions: Dict[str, Dict[str, Any]] = {}
+
+    def create(self, client_id: str, subject: str, description: str) -> str:
+        sid = f"S{int(datetime.utcnow().timestamp())}_{uuid4().hex[:6]}"
+        self.sessions[sid] = {
+            "id": sid,
+            "client_id": client_id,
+            "operator_id": None,
+            "subject": subject,
+            "status": "assigned",
+            "created_at": datetime.utcnow(),
+            "messages": [
+                {
+                    "id": f"m_{uuid4().hex[:8]}",
+                    "sender": "client",
+                    "text": description,
+                    "timestamp": datetime.utcnow(),
+                }
+            ],
+        }
+        return sid
+
+    def get(self, sid: str) -> Optional[Dict[str, Any]]:
+        return self.sessions.get(sid)
+
+    def list(self) -> List[Dict[str, Any]]:
+        return list(self.sessions.values())
+
+    def add_message(self, sid: str, sender: str, text: str, reply_to: Optional[str] = None) -> Dict[str, Any]:
+        s = self.get(sid)
+        if not s:
+            raise KeyError("session not found")
+        msg = {
+            "id": f"m_{uuid4().hex[:8]}",
+            "sender": sender,
+            "text": text,
+            "timestamp": datetime.utcnow(),
+        }
+        if reply_to:
+            msg["replyTo"] = reply_to
+        s["messages"].append(msg)
+        return msg
+
+    def close(self, sid: str, resolved: bool):
+        s = self.get(sid)
+        if not s:
+            raise KeyError("session not found")
+        s["status"] = "solved" if resolved else "closed"
+        s["closed_at"] = datetime.utcnow()
+        return s
+
+session_store = SessionStore()
 
 # Простой трекер тикетов/статистики (in-memory)
 class TicketTracker:
@@ -110,6 +179,12 @@ ticket_tracker = TicketTracker()
 async def startup_event():
     """Инициализация при запуске"""
     logger.info("Запуск Smart Support системы...")
+    # Инициализируем БД и создаём таблицы (если нет)
+    try:
+        Base.metadata.create_all(bind=engine)
+        logger.info("Database initialized")
+    except Exception as _e:
+        logger.error(f"DB init error: {_e}")
     await knowledge_base.initialize()
     await scibox_service.initialize()
     # Загрузка векторного индекса, если есть
@@ -124,6 +199,30 @@ async def read_root():
     """Главная страница"""
     with open("static/index.html", "r", encoding="utf-8") as f:
         return HTMLResponse(content=f.read())
+
+# SPA fallback: обслуживаем index.html для любых путей, не начинающихся с API/статик
+@app.get("/{full_path:path}", response_class=HTMLResponse)
+async def spa_fallback(full_path: str):
+    # Serve API/static/_next normally
+    if full_path.startswith("api/") or full_path.startswith("assets/") or full_path.startswith("static/") or full_path.startswith("_next/"):
+        raise HTTPException(status_code=404, detail="Not Found")
+
+    # Try Next.js static-export routes first: 
+    # e.g. /operator -> static/operator.html, /login/client -> static/login/client.html
+    candidate_files = []
+    if full_path:
+        candidate_files.append(f"static/{full_path}.html")
+        candidate_files.append(f"static/{full_path}/index.html")
+    # Fallback to root index.html
+    candidate_files.append("static/index.html")
+
+    for p in candidate_files:
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                return HTMLResponse(content=f.read())
+        except FileNotFoundError:
+            continue
+    raise HTTPException(status_code=404, detail="Not Found")
 
 @app.get("/vite.svg")
 async def vite_svg():
@@ -350,6 +449,208 @@ async def ticket_stats(client_id: str = "default"):
     except Exception as e:
         logger.error(f"ticket_stats error: {e}")
         raise HTTPException(status_code=500, detail="Ошибка статуса")
+
+@app.post("/api/session/start")
+async def session_start(payload: Dict[str, Any]):
+    try:
+        client_id = str(payload.get("client_id") or f"client_{uuid4().hex[:6]}")
+        subject = (payload.get("subject") or "").strip() or "Вопрос"
+        description = (payload.get("description") or "").strip()
+        if not description:
+            raise HTTPException(status_code=400, detail="description required")
+        sid = session_store.create(client_id, subject, description)
+        # Анализ первого сообщения и автоответ бота
+        req = SupportRequest(
+            request_id=f"req_{uuid4().hex[:8]}",
+            text=description,
+            channel="web",
+            metadata={"reply_mode": "kb"},
+        )
+        try:
+            resp: SupportResponse = await analyze_support_request(req)
+            top = (resp.suggested_responses or [])[:1]
+            if top:
+                session_store.add_message(sid, "bot", top[0])
+            suggestions = resp.suggested_responses
+        except Exception as _e:
+            logger.warning(f"session_start analyze fallback: {_e}")
+            suggestions = []
+        return {
+            "session_id": sid,
+            "subject": subject,
+            "status": session_store.get(sid)["status"],
+            "messages": session_store.get(sid)["messages"],
+            "suggested_responses": suggestions,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"session_start error: {e}")
+        raise HTTPException(status_code=500, detail="session_start failed")
+
+@app.post("/api/message/send")
+async def message_send(payload: Dict[str, Any]):
+    try:
+        sid = str(payload.get("session_id") or "")
+        sender = str(payload.get("sender") or "")
+        text = str(payload.get("text") or "").strip()
+        reply_to = payload.get("reply_to")
+        if not sid or not sender or not text:
+            raise HTTPException(status_code=400, detail="session_id, sender, text required")
+        s = session_store.get(sid)
+        if not s:
+            raise HTTPException(status_code=404, detail="session not found")
+        session_store.add_message(sid, sender, text, reply_to)
+
+        suggestions: List[str] = []
+        operator_requested = False
+        escalate = False
+        # Ключевые слова для вызова оператора
+        kws = ["оператор", "человек", "живой", "сотрудник", "консультант"]
+        if sender == "client":
+            if any(k in text.lower() for k in kws):
+                operator_requested = True
+            # Подсчёт клиентских сообщений
+            client_msgs = [m for m in s["messages"] if m.get("sender") == "client"]
+            # Анализ и автоответ
+            req = SupportRequest(
+                request_id=f"req_{uuid4().hex[:8]}",
+                text=text,
+                channel="web",
+                metadata={"reply_mode": "kb"},
+            )
+            try:
+                resp: SupportResponse = await analyze_support_request(req)
+                suggestions = (resp.suggested_responses or [])[:3]
+                # Негативный тон до 3 вопросов — эскалация
+                if len(client_msgs) <= 3 and (resp.sentiment_score or 0) < -0.3:
+                    escalate = True
+                # Автоответ бота
+                if suggestions:
+                    session_store.add_message(sid, "bot", suggestions[0])
+            except Exception as _e:
+                logger.warning(f"message_send analyze fallback: {_e}")
+                suggestions = []
+            # Предложить подключение оператора после 3 вопросов
+            if len(client_msgs) >= 3:
+                operator_requested = True
+            # Оповещение операторов по WS
+            if escalate or operator_requested:
+                try:
+                    await websocket_manager.broadcast({
+                        "type": "escalate_suggested",
+                        "session_id": sid,
+                        "reason": "sentiment" if escalate else "requested",
+                    })
+                except Exception:
+                    pass
+        else:
+            # Сообщение от оператора: можно предложить доп. ответы из анализа
+            req = SupportRequest(
+                request_id=f"req_{uuid4().hex[:8]}",
+                text=text,
+                channel="web",
+                metadata={"reply_mode": "kb"},
+            )
+            try:
+                resp: SupportResponse = await analyze_support_request(req)
+                suggestions = (resp.suggested_responses or [])[:3]
+            except Exception as _e:
+                logger.warning(f"operator analyze fallback: {_e}")
+                suggestions = []
+
+        return {
+            "session_id": sid,
+            "messages": s["messages"],
+            "suggested_responses": suggestions,
+            "operator_requested": operator_requested,
+            "escalate": escalate,
+            "status": s["status"],
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"message_send error: {e}")
+        raise HTTPException(status_code=500, detail="message_send failed")
+
+@app.post("/api/session/close")
+async def session_close(payload: Dict[str, Any]):
+    try:
+        sid = str(payload.get("session_id") or "")
+        resolved = bool(payload.get("resolved"))
+        if not sid:
+            raise HTTPException(status_code=400, detail="session_id required")
+        s = session_store.close(sid, resolved)
+        return {"session_id": sid, "status": s["status"]}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"session_close error: {e}")
+        raise HTTPException(status_code=500, detail="session_close failed")
+
+@app.get("/api/session/{session_id}")
+async def session_get(session_id: str):
+    s = session_store.get(session_id)
+    if not s:
+        raise HTTPException(status_code=404, detail="session not found")
+    return s
+
+@app.get("/api/session/list")
+async def session_list():
+    items = session_store.list()
+    counts = {"assigned": 0, "started": 0, "solved": 0, "closed": 0}
+    for it in items:
+        st = it.get("status")
+        if st in counts:
+            counts[st] += 1
+    return {"items": items, "counts": counts}
+
+@app.post("/api/message/edit")
+async def message_edit(payload: Dict[str, Any]):
+    try:
+        sid = str(payload.get("session_id") or "")
+        mid = str(payload.get("message_id") or "")
+        new_text = str(payload.get("new_text") or "").strip()
+        if not sid or not mid or not new_text:
+            raise HTTPException(status_code=400, detail="session_id, message_id, new_text required")
+        s = session_store.get(sid)
+        if not s:
+            raise HTTPException(status_code=404, detail="session not found")
+        for m in s["messages"]:
+            if m["id"] == mid:
+                hist = m.setdefault("editHistory", [])
+                hist.append({"text": m["text"], "editedAt": datetime.utcnow().isoformat()})
+                m["text"] = new_text
+                m["edited"] = True
+                break
+        return {"session_id": sid, "messages": s["messages"]}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"message_edit error: {e}")
+        raise HTTPException(status_code=500, detail="message_edit failed")
+
+@app.post("/api/message/delete")
+async def message_delete(payload: Dict[str, Any]):
+    try:
+        sid = str(payload.get("session_id") or "")
+        mid = str(payload.get("message_id") or "")
+        if not sid or not mid:
+            raise HTTPException(status_code=400, detail="session_id, message_id required")
+        s = session_store.get(sid)
+        if not s:
+            raise HTTPException(status_code=404, detail="session not found")
+        for m in s["messages"]:
+            if m["id"] == mid:
+                m["deleted"] = True
+                m["deletedAt"] = datetime.utcnow().isoformat()
+                break
+        return {"session_id": sid, "messages": s["messages"]}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"message_delete error: {e}")
+        raise HTTPException(status_code=500, detail="message_delete failed")
 
 @app.websocket("/ws/{client_id}")
 async def websocket_endpoint(websocket: WebSocket, client_id: str):

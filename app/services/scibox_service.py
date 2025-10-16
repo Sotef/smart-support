@@ -168,7 +168,7 @@ class SciboxService:
         # Фолбэк: простая хеш-векторизация с фиксированной размерностью
         return [self._hash_embedding(t) for t in texts]
 
-    def _hash_embedding(self, text: str, dim: int = 384) -> List[float]:
+    def _hash_embedding(self, text: str, dim: int = 1024) -> List[float]:
         import hashlib
         import math
         vec = [0.0] * dim

@@ -158,45 +158,84 @@ export function ChatArea({
                 )}
               </div>
               
-              {/* Отображаем категории для оператора */}
-              {isOperator && (
-                <div className="mt-2">
-                  {/* Всегда показываем блок категорий для оператора */}
-                  <div className="flex flex-wrap gap-2 items-center">
-                    <div className="flex items-center gap-1 text-xs text-muted-foreground">
-                      <Tag className="h-3 w-3" />
-                      <span>Категория:</span>
-                    </div>
-                    {ticket.categoryDisplay ? (
-                      <Badge variant="secondary" className="text-xs flex items-center gap-1">
-                        <Hash className="h-3 w-3" />
-                        {ticket.categoryDisplay}
-                      </Badge>
-                    ) : (
-                      <Badge variant="outline" className="text-xs text-muted-foreground">
-                        Не определена
-                      </Badge>
-                    )}
-                    
-                    {ticket.subcategoryDisplay && (
-                      <>
-                        <span className="text-xs text-muted-foreground">→</span>
-                        <Badge variant="outline" className="text-xs border-blue-300 text-blue-700 flex items-center gap-1">
-                          <Hash className="h-3 w-3" />
-                          {ticket.subcategoryDisplay}
-                        </Badge>
-                      </>
-                    )}
-                    
-                    {/* Показываем confidence score если есть */}
-                    {ticket.categoryConfidence && (
-                      <div className="text-xs text-muted-foreground ml-2">
-                        <span className="opacity-70">({Math.round(ticket.categoryConfidence * 100)}% уверенность)</span>
+              {/* Отображаем все категории сообщений для оператора */}
+              {isOperator && (() => {
+                const clientMessages = visibleMessages.filter(m => m.sender === 'client');
+                const categorizedMessages = clientMessages.filter(m => m.categoryDisplay || m.category);
+                
+                // Собираем уникальные категории
+                const uniqueCategories = new Map();
+                categorizedMessages.forEach(msg => {
+                  const category = msg.categoryDisplay || msg.category;
+                  const subcategory = msg.subcategoryDisplay || msg.subcategory;
+                  const key = `${category}${subcategory ? '->' + subcategory : ''}`;
+                  
+                  if (!uniqueCategories.has(key) || msg.categoryConfidence > (uniqueCategories.get(key).confidence || 0)) {
+                    uniqueCategories.set(key, {
+                      category,
+                      subcategory,
+                      confidence: msg.categoryConfidence || 0,
+                      count: 1
+                    });
+                  } else {
+                    uniqueCategories.get(key).count++;
+                  }
+                });
+                
+                const categories = Array.from(uniqueCategories.values())
+                  .sort((a, b) => (b.confidence || 0) - (a.confidence || 0)); // Сортируем по уверенности
+                
+                return (
+                  <div className="mt-2">
+                    <div className="flex flex-wrap gap-2 items-center">
+                      <div className="flex items-center gap-1 text-xs text-muted-foreground">
+                        <Tag className="h-3 w-3" />
+                        <span>Категории сообщений:</span>
                       </div>
-                    )}
+                      
+                      {categories.length > 0 ? (
+                        categories.slice(0, 3).map((cat, idx) => ( // Показываем только 3 основных
+                          <div key={idx} className="flex items-center gap-1">
+                            <Badge variant="secondary" className="text-xs flex items-center gap-1">
+                              <Hash className="h-3 w-3" />
+                              {cat.category}
+                              {cat.count > 1 && <span className="ml-1 opacity-60">({cat.count})</span>}
+                            </Badge>
+                            {cat.subcategory && (
+                              <>
+                                <span className="text-xs text-muted-foreground">→</span>
+                                <Badge variant="outline" className="text-xs border-blue-300 text-blue-700">
+                                  {cat.subcategory}
+                                </Badge>
+                              </>
+                            )}
+                            {cat.confidence > 0 && (
+                              <span className="text-xs text-muted-foreground opacity-70">
+                                {Math.round(cat.confidence * 100)}%
+                              </span>
+                            )}
+                          </div>
+                        ))
+                      ) : (
+                        <Badge variant="outline" className="text-xs text-muted-foreground">
+                          Нет категоризированных сообщений
+                        </Badge>
+                      )}
+                      
+                      {categories.length > 3 && (
+                        <Badge variant="ghost" className="text-xs text-muted-foreground">
+                          +{categories.length - 3} ещё
+                        </Badge>
+                      )}
+                      
+                      {/* Общая статистика */}
+                      <div className="text-xs text-muted-foreground ml-2 opacity-50">
+                        ({categorizedMessages.length}/{clientMessages.length} проанализировано)
+                      </div>
+                    </div>
                   </div>
-                </div>
-              )}
+                );
+              })()}
             </div>
           </div>
           <div className="flex items-center gap-2">

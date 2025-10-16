@@ -76,10 +76,19 @@ class KnowledgeBaseCategorizer:
                 if article.id in self.kb_embeddings:
                     kb_embedding = self.kb_embeddings[article.id]
                     
+                    # Проверяем совместимость размерностей
+                    if len(query_embedding) != len(kb_embedding):
+                        logger.warning(f"Dimension mismatch: query={len(query_embedding)}, kb={len(kb_embedding)}, skipping article {article.id}")
+                        continue
+                    
                     # Вычисляем cosine similarity
-                    similarity = cosine_similarity(
-                        [query_embedding], [kb_embedding]
-                    )[0][0]
+                    try:
+                        similarity = cosine_similarity(
+                            [query_embedding], [kb_embedding]
+                        )[0][0]
+                    except ValueError as e:
+                        logger.warning(f"Cosine similarity failed for article {article.id}: {e}")
+                        continue
                     
                     if similarity > best_similarity:
                         best_similarity = similarity

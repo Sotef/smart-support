@@ -87,9 +87,13 @@ export default function OperatorPage() {
     refreshSessions()
     // RT: подписка на события сервера
     try {
-      const proto = typeof window !== 'undefined' && window.location.protocol === 'https:' ? 'wss' : 'ws'
-      const host = typeof window !== 'undefined' ? window.location.hostname : 'localhost'
-      const ws = new WebSocket(`${proto}://${host}:8000/ws/operator_dashboard`)
+      // Используем переменную окружения для WebSocket URL
+      const wsUrl = process.env.NEXT_PUBLIC_WEBSOCKET_URL || (
+        typeof window !== 'undefined' 
+          ? `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.hostname}:8000`
+          : 'ws://localhost:8000'
+      )
+      const ws = new WebSocket(`${wsUrl}/ws/operator_dashboard`)
       ws.onmessage = (ev) => {
         try {
           const msg = JSON.parse(ev.data)
